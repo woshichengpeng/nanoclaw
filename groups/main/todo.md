@@ -2,7 +2,7 @@
 
 ## Pending
 
-- [ ] 🟡 Stop hook 强制 commit - 考虑用 Claude Code Stop hook，在回复前检查未 commit 的改动，有则 block
+- [ ] 🟡 Stop hook 强制 commit - 回复前检查未 commit 改动，有则 block → [设计文档](docs/commit-hook-design.md)
 - [x] 🟡 智能吃药提醒 - 已实现，用链式 schedule_task：每次提醒都预约10分钟后的跟进，用户确认后取消
 
 ## Completed
