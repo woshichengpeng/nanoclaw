@@ -6,8 +6,8 @@ FINNHUB_KEY="d61296hr01qjrrugm7qgd61296hr01qjrrugm7r0"
 BASE_URL="https://finnhub.io/api/v1/quote"
 WATCHLIST="/workspace/group/watchlist.json"
 
-# 读取股票列表
-STOCKS=$(cat "$WATCHLIST" | grep -o '"symbol": "[^"]*"' | head -10 | cut -d'"' -f4)
+# 读取股票列表 (stocks 部分，排除指数)
+STOCKS=$(cat "$WATCHLIST" | sed -n '/"stocks"/,/"indices"/p' | grep -o '"symbol": "[^"]*"' | cut -d'"' -f4)
 
 SESSION_TYPE="${1:-current}"
 
