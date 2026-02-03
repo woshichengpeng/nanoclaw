@@ -1,0 +1,22 @@
+{
+  "stocks": [
+    { "symbol": "XPEV", "name": "小鹏汽车" },
+    { "symbol": "TSLA", "name": "特斯拉" },
+    { "symbol": "QQQM", "name": "纳指100 ETF" },
+    { "symbol": "PDD", "name": "拼多多" },
+    { "symbol": "NVDA", "name": "英伟达" },
+    { "symbol": "IBKR", "name": "盈透证券" },
+    { "symbol": "COST", "name": "好市多" },
+    { "symbol": "BOXX", "name": "BOXX ETF" },
+    { "symbol": "AOM", "name": "iShares 多元配置" },
+    { "symbol": "AMD", "name": "AMD" }
+  ],
+  "indices": [
+    { "symbol": "^GSPC", "name": "标普500" },
+    { "symbol": "^NDX", "name": "纳斯达克100" }
+  ],
+  "settings": {
+    "currency": "USD",
+    "timezone": "America/New_York"
+  }
+}
