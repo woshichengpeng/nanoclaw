@@ -1,5 +1,5 @@
 import 'dotenv/config';
-import { Telegraf } from 'telegraf';
+import { Telegraf, Input } from 'telegraf';
 import pino from 'pino';
 import { execSync } from 'child_process';
 import fs from 'fs';
@@ -14,7 +14,8 @@ import {
   MAIN_GROUP_FOLDER,
   IPC_POLL_INTERVAL,
   TIMEZONE,
-  CONTAINER_IMAGE
+  CONTAINER_IMAGE,
+  GROUPS_DIR
 } from './config.js';
 import { RegisteredGroup, Session, NewMessage } from './types.js';
 import { initDatabase, storeMessage, storeChatMetadata, getNewMessages, getMessagesSince, getAllTasks, updateChatName, getAllChats } from './db.js';
@@ -313,6 +314,45 @@ async function sendMessage(chatId: string, text: string): Promise<void> {
 }
 
 /**
+ * Convert container path to host path.
+ * Container paths: /workspace/project/..., /workspace/group/...
+ * Host paths: projectRoot/..., groups/{folder}/...
+ */
+function containerPathToHostPath(containerPath: string, groupFolder: string): string {
+  const projectRoot = process.cwd();
+
+  if (containerPath.startsWith('/workspace/project/')) {
+    return path.join(projectRoot, containerPath.slice('/workspace/project/'.length));
+  }
+  if (containerPath.startsWith('/workspace/group/')) {
+    return path.join(GROUPS_DIR, groupFolder, containerPath.slice('/workspace/group/'.length));
+  }
+  // Fallback: assume it's already a host path or use as-is
+  return containerPath;
+}
+
+async function sendFile(
+  chatId: string,
+  filePath: string,
+  isImage: boolean,
+  caption?: string
+): Promise<void> {
+  try {
+    const inputFile = Input.fromLocalFile(filePath);
+
+    if (isImage) {
+      await telegrafBot.telegram.sendPhoto(chatId, inputFile, { caption });
+    } else {
+      await telegrafBot.telegram.sendDocument(chatId, inputFile, { caption });
+    }
+
+    logger.info({ chatId, filePath, isImage }, 'File sent');
+  } catch (err) {
+    logger.error({ chatId, filePath, err }, 'Failed to send file');
+  }
+}
+
+/**
  * Process IPC messages for a specific group immediately after agent run.
  * Returns list of chatJids that received messages.
  * This ensures send_message tool calls are processed before result is sent.
@@ -332,15 +372,27 @@ async function processGroupIpcMessages(groupFolder: string, isMain: boolean): Pr
       const filePath = path.join(messagesDir, file);
       try {
         const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+
+        // Authorization: verify this group can send to this chatJid
+        const targetGroup = registeredGroups[data.chatJid];
+        const isAuthorized = isMain || (targetGroup && targetGroup.folder === groupFolder);
+
         if (data.type === 'message' && data.chatJid && data.text) {
-          // Authorization: verify this group can send to this chatJid
-          const targetGroup = registeredGroups[data.chatJid];
-          if (isMain || (targetGroup && targetGroup.folder === groupFolder)) {
+          if (isAuthorized) {
             await sendMessage(data.chatJid, data.text);
             sentToChats.push(data.chatJid);
             logger.info({ chatJid: data.chatJid, groupFolder }, 'IPC message sent (inline)');
           } else {
             logger.warn({ chatJid: data.chatJid, groupFolder }, 'Unauthorized IPC message attempt blocked');
+          }
+        } else if (data.type === 'file' && data.chatJid && data.filePath) {
+          if (isAuthorized) {
+            const hostPath = containerPathToHostPath(data.filePath, groupFolder);
+            await sendFile(data.chatJid, hostPath, data.isImage, data.caption);
+            sentToChats.push(data.chatJid);
+            logger.info({ chatJid: data.chatJid, groupFolder, filePath: hostPath }, 'IPC file sent (inline)');
+          } else {
+            logger.warn({ chatJid: data.chatJid, groupFolder }, 'Unauthorized IPC file attempt blocked');
           }
         }
         fs.unlinkSync(filePath);
@@ -389,15 +441,25 @@ function startIpcWatcher(): void {
             const filePath = path.join(messagesDir, file);
             try {
               const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+
+              // Authorization: verify this group can send to this chatJid
+              const targetGroup = registeredGroups[data.chatJid];
+              const isAuthorized = isMain || (targetGroup && targetGroup.folder === sourceGroup);
+
               if (data.type === 'message' && data.chatJid && data.text) {
-                // Authorization: verify this group can send to this chatJid
-                const targetGroup = registeredGroups[data.chatJid];
-                if (isMain || (targetGroup && targetGroup.folder === sourceGroup)) {
-                  // Telegram bot sends as itself, no ASSISTANT_NAME prefix needed
+                if (isAuthorized) {
                   await sendMessage(data.chatJid, data.text);
                   logger.info({ chatJid: data.chatJid, sourceGroup }, 'IPC message sent');
                 } else {
                   logger.warn({ chatJid: data.chatJid, sourceGroup }, 'Unauthorized IPC message attempt blocked');
+                }
+              } else if (data.type === 'file' && data.chatJid && data.filePath) {
+                if (isAuthorized) {
+                  const hostPath = containerPathToHostPath(data.filePath, sourceGroup);
+                  await sendFile(data.chatJid, hostPath, data.isImage, data.caption);
+                  logger.info({ chatJid: data.chatJid, sourceGroup, filePath: hostPath }, 'IPC file sent');
+                } else {
+                  logger.warn({ chatJid: data.chatJid, sourceGroup }, 'Unauthorized IPC file attempt blocked');
                 }
               }
               fs.unlinkSync(filePath);

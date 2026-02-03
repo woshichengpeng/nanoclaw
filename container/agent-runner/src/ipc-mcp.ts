@@ -67,6 +67,67 @@ export function createIpcMcp(ctx: IpcMcpContext) {
       ),
 
       tool(
+        'send_file',
+        `Send a file to the current chat. Supports images, documents, and other files.
+
+File path must be accessible within the container (e.g., /workspace/group/... or /workspace/project/...).
+For images (jpg, jpeg, png, gif, webp), the file is sent as a photo. Otherwise, it's sent as a document.
+
+Size limits: 10 MB for photos, 50 MB for other files.`,
+        {
+          file_path: z.string().describe('Absolute path to the file inside the container'),
+          caption: z.string().optional().describe('Optional caption/message to accompany the file'),
+          force_document: z.boolean().optional().describe('Force sending as document even if it\'s an image (default: false)')
+        },
+        async (args) => {
+          // Validate the file exists
+          if (!fs.existsSync(args.file_path)) {
+            return {
+              content: [{ type: 'text', text: `Error: File not found: ${args.file_path}` }],
+              isError: true
+            };
+          }
+
+          // Get file stats for size check
+          const stats = fs.statSync(args.file_path);
+          const sizeMB = stats.size / (1024 * 1024);
+
+          // Determine if it's an image based on extension
+          const ext = path.extname(args.file_path).toLowerCase();
+          const imageExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp'];
+          const isImage = imageExtensions.includes(ext) && !args.force_document;
+
+          // Size validation
+          const maxSize = isImage ? 10 : 50;
+          if (sizeMB > maxSize) {
+            return {
+              content: [{ type: 'text', text: `Error: File too large (${sizeMB.toFixed(1)} MB). Max: ${maxSize} MB for ${isImage ? 'photos' : 'documents'}.` }],
+              isError: true
+            };
+          }
+
+          const data = {
+            type: 'file',
+            chatJid,
+            filePath: args.file_path,
+            caption: args.caption,
+            isImage,
+            groupFolder,
+            timestamp: new Date().toISOString()
+          };
+
+          const filename = writeIpcFile(MESSAGES_DIR, data);
+
+          return {
+            content: [{
+              type: 'text',
+              text: `File queued for delivery (${filename}): ${path.basename(args.file_path)}${isImage ? ' (as photo)' : ' (as document)'}`
+            }]
+          };
+        }
+      ),
+
+      tool(
         'schedule_task',
         `Schedule a recurring or one-time task. The task will run as a full agent with access to all tools.
 
