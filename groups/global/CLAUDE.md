@@ -48,7 +48,7 @@ When you learn something important:
 
 ## TODO Management
 
-每个 group 有一个 todos 文件，存在 `/workspace/project/data/todos/{group-folder}.md`
+每个 group 的 todo 文件存在 `/workspace/group/todo.md`。
 
 **格式：**
 ```markdown
@@ -69,7 +69,9 @@ When you learn something important:
 - 🟢 低 - 有空再做
 
 **操作：**
-- 查看：`Read` 对应的 todos 文件
+- 查看：`Read /workspace/group/todo.md`
 - 添加：`Edit` 在 Pending 部分添加
 - 完成：`- [ ]` 改 `- [x]` 并移到 Completed
 - 用户问"有什么待办"时主动读取并汇报
+
+**注意：** 修改 .md 和 .txt 文件后会自动 git commit 保存（main channel 专属功能）。

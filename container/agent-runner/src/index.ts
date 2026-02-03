@@ -5,7 +5,8 @@
 
 import fs from 'fs';
 import path from 'path';
-import { query, HookCallback, PreCompactHookInput } from '@anthropic-ai/claude-agent-sdk';
+import { execSync } from 'child_process';
+import { query, HookCallback, PreCompactHookInput, PostToolUseHookInput } from '@anthropic-ai/claude-agent-sdk';
 import { createIpcMcp } from './ipc-mcp.js';
 
 interface ContainerInput {
@@ -120,6 +121,84 @@ function createPreCompactHook(): HookCallback {
       log(`Archived conversation to ${filePath}`);
     } catch (err) {
       log(`Failed to archive transcript: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    return {};
+  };
+}
+
+/**
+ * Auto-commit memory files (.md, .txt) after Edit/Write operations.
+ * Only runs for main channel which has access to /workspace/project.
+ */
+function createAutoCommitHook(groupFolder: string): HookCallback {
+  return async (input, _toolUseId, _context) => {
+    const postToolUse = input as PostToolUseHookInput;
+    const toolName = postToolUse.tool_name;
+
+    // Only handle Edit and Write tools
+    if (toolName !== 'Edit' && toolName !== 'Write') {
+      return {};
+    }
+
+    const toolInput = postToolUse.tool_input as { file_path?: string };
+    const filePath = toolInput?.file_path;
+
+    if (!filePath) {
+      return {};
+    }
+
+    // Check if it's a memory file we should auto-commit
+    const ext = path.extname(filePath).toLowerCase();
+    if (ext !== '.md' && ext !== '.txt') {
+      return {};
+    }
+
+    // Only auto-commit files in specific directories
+    const isGroupMemory = filePath.startsWith('/workspace/group/');
+    const isProjectMemory = filePath.startsWith('/workspace/project/groups/');
+
+    if (!isGroupMemory && !isProjectMemory) {
+      return {};
+    }
+
+    // Check if we have access to the project (main channel only)
+    if (!fs.existsSync('/workspace/project/.git')) {
+      return {};
+    }
+
+    try {
+      // Map container path to git path
+      let gitPath: string;
+      if (isGroupMemory) {
+        // /workspace/group/foo.md -> groups/{groupFolder}/foo.md
+        gitPath = filePath.replace('/workspace/group/', `groups/${groupFolder}/`);
+      } else {
+        // /workspace/project/... -> ...
+        gitPath = filePath.replace('/workspace/project/', '');
+      }
+
+      const fileName = path.basename(filePath);
+
+      // Stage and commit
+      execSync(`git add "${gitPath}"`, {
+        cwd: '/workspace/project',
+        stdio: 'pipe'
+      });
+
+      execSync(`git commit -m "Auto-save: ${fileName}" --no-verify`, {
+        cwd: '/workspace/project',
+        stdio: 'pipe'
+      });
+
+      log(`Auto-committed memory file: ${gitPath}`);
+    } catch (err) {
+      // Commit might fail if there are no changes (file content unchanged)
+      // This is expected and not an error
+      const errMsg = err instanceof Error ? err.message : String(err);
+      if (!errMsg.includes('nothing to commit')) {
+        log(`Auto-commit skipped or failed: ${errMsg}`);
+      }
     }
 
     return {};
@@ -272,7 +351,10 @@ async function main(): Promise<void> {
           }
         } : { nanoclaw: ipcMcp },
         hooks: {
-          PreCompact: [{ hooks: [createPreCompactHook()] }]
+          PreCompact: [{ hooks: [createPreCompactHook()] }],
+          ...(input.isMain ? {
+            PostToolUse: [{ matcher: 'Edit|Write', hooks: [createAutoCommitHook(input.groupFolder)] }]
+          } : {})
         }
       }
     })) {
