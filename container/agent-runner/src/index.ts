@@ -186,7 +186,7 @@ function createAutoCommitHook(groupFolder: string): HookCallback {
         stdio: 'pipe'
       });
 
-      execSync(`git commit -m "Auto-save: ${fileName}" --no-verify`, {
+      execSync(`git commit -m "Auto-save: ${fileName}" --author="Andy <andy@nanoclaw.local>" --no-verify`, {
         cwd: '/workspace/project',
         stdio: 'pipe'
       });
