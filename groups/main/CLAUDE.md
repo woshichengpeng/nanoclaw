@@ -29,8 +29,11 @@ You have access to the entire NanoClaw codebase at `/workspace/project/`. You ca
 3. If container code changed: `cd /workspace/project && ./container/build.sh`
 4. Request restart: use `mcp__nanoclaw__request_restart` tool (WITHOUT committing first!)
 5. Wait for service to restart and confirm it's working
-6. If working: commit the changes within 30 minutes: `git add <files> && git commit -m "description"`
-7. If broken: the 30-minute rollback will automatically revert the changes
+6. If working: commit IMMEDIATELY (before replying to user!): `git add <files> && git commit -m "description"`
+7. Then reply to user with the result
+8. If broken: the 30-minute rollback will automatically revert the changes
+
+**IMPORTANT:** Always commit BEFORE sending the success message to the user. This ensures commit is never forgotten.
 
 **Why this order:** If you commit first and then restart with broken code, you can't auto-rollback. By restarting first without committing, a crash will be automatically fixed by the 30-minute rollback.
 
