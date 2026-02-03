@@ -21,23 +21,24 @@ You have access to the entire NanoClaw codebase at `/workspace/project/`. You ca
 
 ### Safety Rules
 
-**30-minute commit rule:** Uncommitted code changes will be automatically rolled back after 30 minutes. Always commit your changes!
+**30-minute rollback rule:** Uncommitted code changes will be automatically rolled back after 30 minutes. This is a safety feature!
 
-**Workflow for code changes:**
+**Workflow for code changes (safe restart first):**
 1. Make the change
 2. Test if possible (e.g., `npm run build` to check TypeScript)
-3. Commit immediately: `git add <files> && git commit -m "description"`
-4. If container code changed: `cd /workspace/project && ./container/build.sh`
-5. Request restart: use `mcp__nanoclaw__request_restart` tool
-6. Tell the user the service is restarting
+3. If container code changed: `cd /workspace/project && ./container/build.sh`
+4. Request restart: use `mcp__nanoclaw__request_restart` tool (WITHOUT committing first!)
+5. Wait for service to restart and confirm it's working
+6. If working: commit the changes within 30 minutes: `git add <files> && git commit -m "description"`
+7. If broken: the 30-minute rollback will automatically revert the changes
+
+**Why this order:** If you commit first and then restart with broken code, you can't auto-rollback. By restarting first without committing, a crash will be automatically fixed by the 30-minute rollback.
 
 **Key files:**
 - `/workspace/project/src/index.ts` - Main app, message routing
 - `/workspace/project/src/container-runner.ts` - Container spawning
 - `/workspace/project/container/agent-runner/src/index.ts` - Agent code (runs inside container)
 - `/workspace/project/groups/main/CLAUDE.md` - This file (your instructions)
-
-**Warning:** If the service crashes after your changes, it will rollback on restart. Test carefully!
 
 ## Long Tasks
 
