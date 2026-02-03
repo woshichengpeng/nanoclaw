@@ -1,6 +1,10 @@
 #!/bin/bash
 # 生成行情汇报 (使用 Finnhub API)
 # 用法: ./market-report.sh [pre|open|close]
+# 自动处理夏令时/冬令时
+
+# 使用美东时区
+export TZ="America/New_York"
 
 FINNHUB_KEY="d61296hr01qjrrugm7qgd61296hr01qjrrugm7r0"
 BASE_URL="https://finnhub.io/api/v1/quote"
