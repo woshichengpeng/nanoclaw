@@ -45,3 +45,31 @@ When you learn something important:
 - Split files larger than 500 lines into folders
 - Add recurring context directly to this CLAUDE.md
 - Always index new memory files at the top of CLAUDE.md
+
+## TODO Management
+
+每个 group 有一个 todos 文件，存在 `/workspace/project/data/todos/{group-folder}.md`
+
+**格式：**
+```markdown
+# TODO
+
+## Pending
+- [ ] 🔴 高优先级任务
+- [ ] 🟡 中优先级任务
+- [ ] 🟢 低优先级任务
+
+## Completed
+- [x] 已完成的任务
+```
+
+**优先级：**
+- 🔴 高 - 紧急/重要
+- 🟡 中 - 正常
+- 🟢 低 - 有空再做
+
+**操作：**
+- 查看：`Read` 对应的 todos 文件
+- 添加：`Edit` 在 Pending 部分添加
+- 完成：`- [ ]` 改 `- [x]` 并移到 Completed
+- 用户问"有什么待办"时主动读取并汇报
