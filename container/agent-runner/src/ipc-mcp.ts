@@ -315,6 +315,42 @@ Use available_groups.json to find the JID for a group. The folder name should be
             }]
           };
         }
+      ),
+
+      // Request service restart (main only) - for applying code changes
+      tool(
+        'request_restart',
+        `Request the NanoClaw service to restart. Use this after making code changes that need to take effect.
+
+Main channel only. The service will restart gracefully after a short delay.
+
+**Important:** Make sure you have committed your code changes before requesting a restart, otherwise they will be rolled back!`,
+        {},
+        async () => {
+          if (!isMain) {
+            return {
+              content: [{
+                type: 'text',
+                text: 'Error: Only the main channel can request service restarts.'
+              }]
+            };
+          }
+
+          const data = {
+            type: 'request_restart',
+            groupFolder,
+            timestamp: new Date().toISOString()
+          };
+
+          writeIpcFile(TASKS_DIR, data);
+
+          return {
+            content: [{
+              type: 'text',
+              text: 'Service restart requested. The service will restart in a few seconds. Your current session will end.'
+            }]
+          };
+        }
       )
     ]
   });

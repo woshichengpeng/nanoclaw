@@ -502,6 +502,20 @@ async function processTaskIpc(
       }
       break;
 
+    case 'request_restart':
+      // Only main group can request a restart
+      if (!isMain) {
+        logger.warn({ sourceGroup }, 'Unauthorized request_restart attempt blocked');
+        break;
+      }
+      logger.info({ sourceGroup }, 'Service restart requested via IPC');
+      // Delay restart to allow current request to complete
+      setTimeout(() => {
+        logger.info('Restarting service...');
+        process.exit(0); // launchd will restart us
+      }, 2000);
+      break;
+
     default:
       logger.warn({ type: data.type }, 'Unknown IPC task type');
   }
