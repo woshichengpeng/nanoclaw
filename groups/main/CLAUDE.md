@@ -21,7 +21,7 @@ You have access to the entire NanoClaw codebase at `/workspace/project/`. You ca
 
 ### Safety Rules
 
-**5-minute commit rule:** Uncommitted code changes will be automatically rolled back after 5 minutes. Always commit your changes!
+**30-minute commit rule:** Uncommitted code changes will be automatically rolled back after 30 minutes. Always commit your changes!
 
 **Workflow for code changes:**
 1. Make the change

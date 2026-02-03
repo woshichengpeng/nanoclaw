@@ -605,8 +605,8 @@ async function startMessageLoop(): Promise<void> {
 }
 
 // === Code Rollback Mechanism ===
-// If Andy makes code changes but doesn't commit within 5 minutes, auto-rollback
-const ROLLBACK_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
+// If Andy makes code changes but doesn't commit within 30 minutes, auto-rollback
+const ROLLBACK_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 let lastCleanStateTime = Date.now();
 
 function hasUncommittedChanges(): boolean {
@@ -656,7 +656,7 @@ function startRollbackMonitor(): void {
       lastCleanStateTime = Date.now();
     }
   }, 60000); // Check every minute
-  logger.info('Code rollback monitor started (5 min timeout)');
+  logger.info('Code rollback monitor started (30 min timeout)');
 }
 
 function ensureContainerSystemRunning(): void {
