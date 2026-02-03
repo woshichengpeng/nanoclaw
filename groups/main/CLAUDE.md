@@ -27,11 +27,13 @@ You have access to the entire NanoClaw codebase at `/workspace/project/`. You ca
 1. Make the change
 2. Test if possible (e.g., `npm run build` to check TypeScript)
 3. If container code changed: `cd /workspace/project && ./container/build.sh`
-4. Request restart: use `mcp__nanoclaw__request_restart` tool (WITHOUT committing first!)
-5. Wait for service to restart and confirm it's working
-6. If working: commit IMMEDIATELY (before replying to user!): `git add <files> && git commit -m "description"`
-7. Then reply to user with the result
+4. Request restart: use `mcp__nanoclaw__request_restart` tool (NO commit yet)
+5. Verify it works. If you cannot verify locally, ask the user to confirm; do not commit until confirmation.
+6. Once verified: commit IMMEDIATELY (before replying to user!): `git add <files> && git commit -m "description"`
+7. Then reply to the user with the result
 8. If broken: the 30-minute rollback will automatically revert the changes
+
+**Rule:** Verification must happen before commit. Commit must happen before the success reply.
 
 **IMPORTANT:** Always commit BEFORE sending the success message to the user. This ensures commit is never forgotten.
 
