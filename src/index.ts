@@ -204,6 +204,15 @@ async function processMessage(msg: NewMessage): Promise<void> {
   const content = msg.content.trim();
   const isMainGroup = group.folder === MAIN_GROUP_FOLDER;
 
+  // Handle /newsession command - start a fresh session
+  if (content === '/newsession' || content.endsWith('/newsession')) {
+    delete sessions[group.folder];
+    saveState();
+    logger.info({ group: group.name }, 'Session cleared by /newsession command');
+    await sendMessage(msg.chat_jid, '✅ Session cleared. Next message will start a fresh conversation.');
+    return;
+  }
+
   // Main group responds to all messages; other groups require trigger prefix
   if (!isMainGroup && !TRIGGER_PATTERN.test(content)) return;
 
