@@ -9,7 +9,8 @@
     { "symbol": "COST", "name": "好市多" },
     { "symbol": "BOXX", "name": "BOXX ETF" },
     { "symbol": "AOM", "name": "iShares 多元配置" },
-    { "symbol": "AMD", "name": "AMD" }
+    { "symbol": "AMD", "name": "AMD" },
+    { "symbol": "MSFT", "name": "微软" }
   ],
   "indices": [
     { "symbol": "^GSPC", "name": "标普500" },
