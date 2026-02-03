@@ -227,7 +227,8 @@ async function processMessage(msg: NewMessage): Promise<void> {
       .replace(/</g, '&lt;')
       .replace(/>/g, '&gt;')
       .replace(/"/g, '&quot;');
-    return `<message sender="${escapeXml(m.sender_name)}" time="${m.timestamp}">${escapeXml(m.content)}</message>`;
+    const mediaAttr = m.media_path ? ` media="/workspace/group/media/${path.basename(m.media_path)}"` : '';
+    return `<message sender="${escapeXml(m.sender_name)}" time="${m.timestamp}"${mediaAttr}>${escapeXml(m.content)}</message>`;
   });
   const prompt = `<messages>\n${lines.join('\n')}\n</messages>`;
 
@@ -703,14 +704,25 @@ async function processTaskIpc(
   }
 }
 
-function setupTelegram(): void {
-  // Handle incoming messages
-  telegrafBot.on('message', async (ctx) => {
-    if (!ctx.message || !('text' in ctx.message)) return;
+async function downloadTelegramFile(fileId: string, groupFolder: string, fileName: string): Promise<string> {
+  const mediaDir = path.join(GROUPS_DIR, groupFolder, 'media');
+  fs.mkdirSync(mediaDir, { recursive: true });
 
+  const fileLink = await telegrafBot.telegram.getFileLink(fileId);
+  const response = await fetch(fileLink.href);
+  const buffer = Buffer.from(await response.arrayBuffer());
+
+  const filePath = path.join(mediaDir, fileName);
+  fs.writeFileSync(filePath, buffer);
+
+  return filePath;
+}
+
+function setupTelegram(): void {
+  // Handle incoming messages (including text, photos, documents)
+  telegrafBot.on('message', async (ctx) => {
     const chatId = String(ctx.chat.id);
     const isGroup = ctx.chat.type === 'group' || ctx.chat.type === 'supergroup';
-    const content = ctx.message.text;
     const senderId = String(ctx.from?.id || ctx.chat.id);
     const senderName = ctx.from?.first_name || ctx.from?.username || 'User';
     const timestamp = new Date(ctx.message.date * 1000).toISOString();
@@ -722,6 +734,45 @@ function setupTelegram(): void {
       return;
     }
 
+    let content = '';
+    let mediaPath: string | undefined;
+
+    // Handle different message types
+    if ('text' in ctx.message) {
+      content = ctx.message.text;
+    } else if ('photo' in ctx.message) {
+      // Get the largest photo (last in array)
+      const photo = ctx.message.photo[ctx.message.photo.length - 1];
+      const caption = ('caption' in ctx.message ? ctx.message.caption : '') || '';
+      const fileName = `${ctx.message.message_id}_${Date.now()}.jpg`;
+
+      try {
+        mediaPath = await downloadTelegramFile(photo.file_id, group.folder, fileName);
+        content = caption || '[图片]';
+        logger.info({ chatId, fileName, mediaPath }, 'Downloaded photo');
+      } catch (err) {
+        logger.error({ chatId, err }, 'Failed to download photo');
+        content = '[图片下载失败]';
+      }
+    } else if ('document' in ctx.message) {
+      const doc = ctx.message.document;
+      const caption = ('caption' in ctx.message ? ctx.message.caption : '') || '';
+      const fileName = `${ctx.message.message_id}_${doc.file_name || 'file'}`;
+
+      try {
+        mediaPath = await downloadTelegramFile(doc.file_id, group.folder, fileName);
+        content = caption || `[文件: ${doc.file_name || 'unknown'}]`;
+        logger.info({ chatId, fileName, mediaPath }, 'Downloaded document');
+      } catch (err) {
+        logger.error({ chatId, err }, 'Failed to download document');
+        content = `[文件下载失败: ${doc.file_name || 'unknown'}]`;
+      }
+    } else {
+      // Unsupported message type (sticker, voice, etc.)
+      logger.debug({ chatId, messageType: Object.keys(ctx.message) }, 'Unsupported message type');
+      return;
+    }
+
     // Store message in database
     storeChatMetadata(chatId, timestamp);
     storeMessage({
@@ -729,9 +780,9 @@ function setupTelegram(): void {
       message: { conversation: content },
       messageTimestamp: ctx.message.date,
       pushName: senderName
-    }, chatId, false, senderName);
+    }, chatId, false, senderName, mediaPath);
 
-    logger.info({ chatId, isGroup, senderName }, `Telegram message: ${content.substring(0, 50)}...`);
+    logger.info({ chatId, isGroup, senderName, hasMedia: !!mediaPath }, `Telegram message: ${content.substring(0, 50)}...`);
   });
 
   // Start the bot
