@@ -23,21 +23,26 @@ You have access to the entire NanoClaw codebase at `/workspace/project/`. You ca
 
 **30-minute rollback rule:** Uncommitted code changes will be automatically rolled back after 30 minutes. This is a safety feature!
 
-**Workflow for code changes (safe restart first):**
+**⚠️ CRITICAL: Commit before replying!**
+After ANY file change that works: `git commit` FIRST, THEN reply to user. Never reply with "done/fixed/已修复" before committing.
+
+**Workflow A - Simple changes (scripts, configs, CLAUDE.md):**
 1. Make the change
-2. Test if possible (e.g., `npm run build` to check TypeScript)
-3. If container code changed: `cd /workspace/project && ./container/build.sh`
-4. Request restart: use `mcp__nanoclaw__request_restart` tool (NO commit yet)
-5. Verify it works. If you cannot verify locally, ask the user to confirm; do not commit until confirmation.
-6. Once verified: commit IMMEDIATELY (before replying to user!): `git add <files> && git commit -m "description"`
-7. Then reply to the user with the result
-8. If broken: the 30-minute rollback will automatically revert the changes
+2. Test it (run script, verify output)
+3. **COMMIT IMMEDIATELY** - before ANY reply to user
+4. Then reply with result
 
-**Rule:** Verification must happen before commit. Commit must happen before the success reply.
+**Workflow B - Code changes requiring restart (TypeScript, container code):**
+1. Make the change
+2. Test if possible (e.g., `npm run build`)
+3. If container code: `cd /workspace/project && ./container/build.sh`
+4. Request restart (NO commit yet)
+5. Verify it works (ask user if needed)
+6. **COMMIT IMMEDIATELY** - before ANY reply to user
+7. Then reply with result
+8. If broken: 30-minute rollback will auto-revert
 
-**IMPORTANT:** Always commit BEFORE sending the success message to the user. This ensures commit is never forgotten.
-
-**Why this order:** If you commit first and then restart with broken code, you can't auto-rollback. By restarting first without committing, a crash will be automatically fixed by the 30-minute rollback.
+**Why this matters:** If you reply before committing, you WILL forget to commit. The 30-minute rollback will then destroy your work.
 
 **Key files:**
 - `/workspace/project/src/index.ts` - Main app, message routing
