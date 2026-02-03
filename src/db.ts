@@ -75,6 +75,11 @@ export function initDatabase(): void {
     db.exec(`ALTER TABLE messages ADD COLUMN reply_to_id TEXT`);
   } catch { /* column already exists */ }
 
+  // Add reply_to_content column if it doesn't exist (migration for existing DBs)
+  try {
+    db.exec(`ALTER TABLE messages ADD COLUMN reply_to_content TEXT`);
+  } catch { /* column already exists */ }
+
   // Add context_mode column if it doesn't exist (migration for existing DBs)
   try {
     db.exec(`ALTER TABLE scheduled_tasks ADD COLUMN context_mode TEXT DEFAULT 'isolated'`);
@@ -154,7 +159,7 @@ export function setLastGroupSync(): void {
  * Store a message with full content.
  * Only call this for registered groups where message history is needed.
  */
-export function storeMessage(msg: proto.IWebMessageInfo, chatJid: string, isFromMe: boolean, pushName?: string, mediaPath?: string, replyToId?: string): void {
+export function storeMessage(msg: proto.IWebMessageInfo, chatJid: string, isFromMe: boolean, pushName?: string, mediaPath?: string, replyToContent?: string): void {
   if (!msg.key) return;
 
   const content =
@@ -169,8 +174,8 @@ export function storeMessage(msg: proto.IWebMessageInfo, chatJid: string, isFrom
   const senderName = pushName || sender.split('@')[0];
   const msgId = msg.key.id || '';
 
-  db.prepare(`INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, media_path, reply_to_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-    .run(msgId, chatJid, sender, senderName, content, timestamp, isFromMe ? 1 : 0, mediaPath || null, replyToId || null);
+  db.prepare(`INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, media_path, reply_to_content) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    .run(msgId, chatJid, sender, senderName, content, timestamp, isFromMe ? 1 : 0, mediaPath || null, replyToContent || null);
 }
 
 export function getNewMessages(jids: string[], lastTimestamp: string, botPrefix: string): { messages: NewMessage[]; newTimestamp: string } {
@@ -179,7 +184,7 @@ export function getNewMessages(jids: string[], lastTimestamp: string, botPrefix:
   const placeholders = jids.map(() => '?').join(',');
   // Filter out bot's own messages by checking content prefix (not is_from_me, since user shares the account)
   const sql = `
-    SELECT id, chat_jid, sender, sender_name, content, timestamp, media_path, reply_to_id
+    SELECT id, chat_jid, sender, sender_name, content, timestamp, media_path, reply_to_content
     FROM messages
     WHERE timestamp > ? AND chat_jid IN (${placeholders}) AND content NOT LIKE ?
     ORDER BY timestamp
@@ -198,21 +203,12 @@ export function getNewMessages(jids: string[], lastTimestamp: string, botPrefix:
 export function getMessagesSince(chatJid: string, sinceTimestamp: string, botPrefix: string): NewMessage[] {
   // Filter out bot's own messages by checking content prefix
   const sql = `
-    SELECT id, chat_jid, sender, sender_name, content, timestamp, media_path, reply_to_id
+    SELECT id, chat_jid, sender, sender_name, content, timestamp, media_path, reply_to_content
     FROM messages
     WHERE chat_jid = ? AND timestamp > ? AND content NOT LIKE ?
     ORDER BY timestamp
   `;
   return db.prepare(sql).all(chatJid, sinceTimestamp, `${botPrefix}:%`) as NewMessage[];
-}
-
-export function getMessageById(chatJid: string, messageId: string): NewMessage | undefined {
-  const sql = `
-    SELECT id, chat_jid, sender, sender_name, content, timestamp, media_path, reply_to_id
-    FROM messages
-    WHERE chat_jid = ? AND id = ?
-  `;
-  return db.prepare(sql).get(chatJid, messageId) as NewMessage | undefined;
 }
 
 export function createTask(task: Omit<ScheduledTask, 'last_run' | 'last_result'>): void {

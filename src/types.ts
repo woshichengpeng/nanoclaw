@@ -53,7 +53,7 @@ export interface NewMessage {
   content: string;
   timestamp: string;
   media_path?: string;
-  reply_to_id?: string;
+  reply_to_content?: string;
 }
 
 export interface ScheduledTask {

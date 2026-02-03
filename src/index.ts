@@ -18,7 +18,7 @@ import {
   GROUPS_DIR
 } from './config.js';
 import { RegisteredGroup, Session, NewMessage } from './types.js';
-import { initDatabase, storeMessage, storeChatMetadata, getNewMessages, getMessagesSince, getMessageById, getAllTasks, updateChatName, getAllChats } from './db.js';
+import { initDatabase, storeMessage, storeChatMetadata, getNewMessages, getMessagesSince, getAllTasks, updateChatName, getAllChats } from './db.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { runContainerAgent, writeTasksSnapshot, writeGroupsSnapshot, AvailableGroup } from './container-runner.js';
 import { loadJson, saveJson } from './utils.js';
@@ -229,14 +229,8 @@ async function processMessage(msg: NewMessage): Promise<void> {
       .replace(/"/g, '&quot;');
     const mediaAttr = m.media_path ? ` media="/workspace/group/media/${path.basename(m.media_path)}"` : '';
 
-    // If this is a reply, include the original message content
-    let replyAttr = '';
-    if (m.reply_to_id) {
-      const originalMsg = getMessageById(msg.chat_jid, m.reply_to_id);
-      if (originalMsg) {
-        replyAttr = ` reply_to="${escapeXml(originalMsg.sender_name)}: ${escapeXml(originalMsg.content.substring(0, 100))}"`;
-      }
-    }
+    // If this is a reply, include the original message content (already extracted from Telegram)
+    const replyAttr = m.reply_to_content ? ` reply_to="${escapeXml(m.reply_to_content)}"` : '';
 
     return `<message sender="${escapeXml(m.sender_name)}" time="${m.timestamp}"${mediaAttr}${replyAttr}>${escapeXml(m.content)}</message>`;
   });
@@ -746,11 +740,28 @@ function setupTelegram(): void {
 
     let content = '';
     let mediaPath: string | undefined;
-    let replyToId: string | undefined;
+    let replyToContent: string | undefined;
 
-    // Check if this is a reply to another message
+    // Check if this is a reply to another message - extract original content directly from Telegram
     if ('reply_to_message' in ctx.message && ctx.message.reply_to_message) {
-      replyToId = String(ctx.message.reply_to_message.message_id);
+      const replyMsg = ctx.message.reply_to_message;
+      const replySender = replyMsg.from?.first_name || replyMsg.from?.username || 'Unknown';
+      let replyText = '';
+
+      if ('text' in replyMsg) {
+        replyText = replyMsg.text;
+      } else if ('caption' in replyMsg && replyMsg.caption) {
+        replyText = replyMsg.caption;
+      } else if ('photo' in replyMsg) {
+        replyText = '[图片]';
+      } else if ('document' in replyMsg) {
+        replyText = '[文件]';
+      } else {
+        replyText = '[消息]';
+      }
+
+      // Limit to 100 chars for brevity
+      replyToContent = `${replySender}: ${replyText.substring(0, 100)}`;
     }
 
     // Handle different message types
@@ -796,9 +807,9 @@ function setupTelegram(): void {
       message: { conversation: content },
       messageTimestamp: ctx.message.date,
       pushName: senderName
-    }, chatId, false, senderName, mediaPath, replyToId);
+    }, chatId, false, senderName, mediaPath, replyToContent);
 
-    logger.info({ chatId, isGroup, senderName, hasMedia: !!mediaPath, replyTo: replyToId }, `Telegram message: ${content.substring(0, 50)}...`);
+    logger.info({ chatId, isGroup, senderName, hasMedia: !!mediaPath, replyTo: replyToContent }, `Telegram message: ${content.substring(0, 50)}...`);
   });
 
   // Start the bot
