@@ -805,7 +805,6 @@ function ensureContainerSystemRunning(): void {
 }
 
 async function main(): Promise<void> {
-  checkAndRollbackUncommittedChanges();
   ensureContainerSystemRunning();
   initDatabase();
   logger.info('Database initialized');
