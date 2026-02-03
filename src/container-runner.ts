@@ -134,7 +134,8 @@ function buildVolumeMounts(group: RegisteredGroup, isMain: boolean): VolumeMount
       'ANTHROPIC_DEFAULT_OPUS_MODEL',
       'ANTHROPIC_DEFAULT_SONNET_MODEL',
       'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC',
-      'DISABLE_NON_ESSENTIAL_MODEL_CALLS'
+      'DISABLE_NON_ESSENTIAL_MODEL_CALLS',
+      'BRAVE_API_KEY'
     ];
     const filteredLines = envContent
       .split('\n')

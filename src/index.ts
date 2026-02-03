@@ -123,9 +123,18 @@ async function processMessage(msg: NewMessage): Promise<void> {
 
   logger.info({ group: group.name, messageCount: missedMessages.length }, 'Processing message');
 
+  // Send typing indicator every 4 seconds while agent is running
   await setTyping(msg.chat_jid, true);
-  const response = await runAgent(group, prompt, msg.chat_jid);
-  await setTyping(msg.chat_jid, false);
+  const typingInterval = setInterval(() => {
+    setTyping(msg.chat_jid, true).catch(() => {});
+  }, 4000);
+
+  let response: string | null;
+  try {
+    response = await runAgent(group, prompt, msg.chat_jid);
+  } finally {
+    clearInterval(typingInterval);
+  }
 
   // Process any IPC messages from this agent run BEFORE deciding to send result
   // This ensures send_message calls take precedence over result
@@ -581,6 +590,61 @@ async function startMessageLoop(): Promise<void> {
   }
 }
 
+// === Code Rollback Mechanism ===
+// If Andy makes code changes but doesn't commit within 5 minutes, auto-rollback
+const ROLLBACK_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
+let lastCleanStateTime = Date.now();
+
+function hasUncommittedChanges(): boolean {
+  try {
+    const status = execSync('git status --porcelain', {
+      cwd: process.cwd(),
+      encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'pipe']
+    });
+    return status.trim().length > 0;
+  } catch {
+    return false;
+  }
+}
+
+function rollbackChanges(): void {
+  try {
+    logger.warn('Rolling back uncommitted code changes...');
+    execSync('git checkout .', { cwd: process.cwd(), stdio: 'pipe' });
+    execSync('git clean -fd', { cwd: process.cwd(), stdio: 'pipe' });
+    logger.info('Code changes rolled back successfully');
+  } catch (err) {
+    logger.error({ err }, 'Failed to rollback code changes');
+  }
+}
+
+function checkAndRollbackUncommittedChanges(): void {
+  if (hasUncommittedChanges()) {
+    logger.warn('Uncommitted code changes detected on startup - rolling back');
+    rollbackChanges();
+  } else {
+    logger.debug('No uncommitted changes detected');
+  }
+  lastCleanStateTime = Date.now();
+}
+
+function startRollbackMonitor(): void {
+  setInterval(() => {
+    if (hasUncommittedChanges()) {
+      const timeSinceClean = Date.now() - lastCleanStateTime;
+      if (timeSinceClean > ROLLBACK_TIMEOUT_MS) {
+        logger.warn({ timeSinceClean }, 'Uncommitted changes exceeded timeout - rolling back and restarting');
+        rollbackChanges();
+        process.exit(1); // launchd will restart us
+      }
+    } else {
+      lastCleanStateTime = Date.now();
+    }
+  }, 60000); // Check every minute
+  logger.info('Code rollback monitor started (5 min timeout)');
+}
+
 function ensureContainerSystemRunning(): void {
   try {
     execSync('container system status', { stdio: 'pipe' });
@@ -606,11 +670,13 @@ function ensureContainerSystemRunning(): void {
 }
 
 async function main(): Promise<void> {
+  checkAndRollbackUncommittedChanges();
   ensureContainerSystemRunning();
   initDatabase();
   logger.info('Database initialized');
   loadState();
   setupTelegram();
+  startRollbackMonitor();
 }
 
 main().catch(err => {

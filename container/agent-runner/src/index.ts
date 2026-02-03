@@ -225,6 +225,20 @@ async function main(): Promise<void> {
   let result: string | null = null;
   let newSessionId: string | undefined;
 
+  // Check if session file exists before trying to resume
+  let sessionToResume = input.sessionId;
+  if (sessionToResume) {
+    const sessionFile = path.join(
+      process.env.HOME || '/home/node',
+      '.claude/projects/-workspace-group',
+      `${sessionToResume}.jsonl`
+    );
+    if (!fs.existsSync(sessionFile)) {
+      log(`Session file not found, starting fresh: ${sessionToResume}`);
+      sessionToResume = undefined;
+    }
+  }
+
   // Add context for scheduled tasks
   let prompt = input.prompt;
   if (input.isScheduledTask) {
@@ -238,19 +252,25 @@ async function main(): Promise<void> {
       prompt,
       options: {
         cwd: '/workspace/group',
-        resume: input.sessionId,
+        resume: sessionToResume,
         allowedTools: [
           'Bash',
           'Read', 'Write', 'Edit', 'Glob', 'Grep',
-          'WebSearch', 'WebFetch',
-          'mcp__nanoclaw__*'
+          'WebFetch',
+          'mcp__nanoclaw__*',
+          'mcp__brave-search__*'
         ],
         permissionMode: 'bypassPermissions',
         allowDangerouslySkipPermissions: true,
         settingSources: ['project'],
-        mcpServers: {
-          nanoclaw: ipcMcp
-        },
+        mcpServers: process.env.BRAVE_API_KEY ? {
+          nanoclaw: ipcMcp,
+          'brave-search': {
+            command: 'npx',
+            args: ['-y', '@brave/brave-search-mcp-server'],
+            env: { BRAVE_API_KEY: process.env.BRAVE_API_KEY }
+          }
+        } : { nanoclaw: ipcMcp },
         hooks: {
           PreCompact: [{ hooks: [createPreCompactHook()] }]
         }
