@@ -18,7 +18,7 @@ import {
   GROUPS_DIR
 } from './config.js';
 import { RegisteredGroup, Session, NewMessage } from './types.js';
-import { initDatabase, storeMessage, storeChatMetadata, getNewMessages, getMessagesSince, getAllTasks, updateChatName, getAllChats } from './db.js';
+import { initDatabase, storeMessage, storeChatMetadata, getNewMessages, getMessagesSince, getMessageById, getAllTasks, updateChatName, getAllChats } from './db.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { runContainerAgent, writeTasksSnapshot, writeGroupsSnapshot, AvailableGroup } from './container-runner.js';
 import { loadJson, saveJson } from './utils.js';
@@ -228,7 +228,17 @@ async function processMessage(msg: NewMessage): Promise<void> {
       .replace(/>/g, '&gt;')
       .replace(/"/g, '&quot;');
     const mediaAttr = m.media_path ? ` media="/workspace/group/media/${path.basename(m.media_path)}"` : '';
-    return `<message sender="${escapeXml(m.sender_name)}" time="${m.timestamp}"${mediaAttr}>${escapeXml(m.content)}</message>`;
+
+    // If this is a reply, include the original message content
+    let replyAttr = '';
+    if (m.reply_to_id) {
+      const originalMsg = getMessageById(msg.chat_jid, m.reply_to_id);
+      if (originalMsg) {
+        replyAttr = ` reply_to="${escapeXml(originalMsg.sender_name)}: ${escapeXml(originalMsg.content.substring(0, 100))}"`;
+      }
+    }
+
+    return `<message sender="${escapeXml(m.sender_name)}" time="${m.timestamp}"${mediaAttr}${replyAttr}>${escapeXml(m.content)}</message>`;
   });
   const prompt = `<messages>\n${lines.join('\n')}\n</messages>`;
 
@@ -736,6 +746,12 @@ function setupTelegram(): void {
 
     let content = '';
     let mediaPath: string | undefined;
+    let replyToId: string | undefined;
+
+    // Check if this is a reply to another message
+    if ('reply_to_message' in ctx.message && ctx.message.reply_to_message) {
+      replyToId = String(ctx.message.reply_to_message.message_id);
+    }
 
     // Handle different message types
     if ('text' in ctx.message) {
@@ -780,9 +796,9 @@ function setupTelegram(): void {
       message: { conversation: content },
       messageTimestamp: ctx.message.date,
       pushName: senderName
-    }, chatId, false, senderName, mediaPath);
+    }, chatId, false, senderName, mediaPath, replyToId);
 
-    logger.info({ chatId, isGroup, senderName, hasMedia: !!mediaPath }, `Telegram message: ${content.substring(0, 50)}...`);
+    logger.info({ chatId, isGroup, senderName, hasMedia: !!mediaPath, replyTo: replyToId }, `Telegram message: ${content.substring(0, 50)}...`);
   });
 
   // Start the bot
