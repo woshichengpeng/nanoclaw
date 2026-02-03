@@ -351,6 +351,46 @@ Main channel only. The service will restart gracefully after a short delay.
             }]
           };
         }
+      ),
+
+      tool(
+        'rebuild_container',
+        `Rebuild the agent container image. Main channel only.
+
+Use this after making changes to container code (Dockerfile, agent-runner, etc.).
+
+**Workflow:**
+1. Make changes to container code (but DON'T commit yet)
+2. Call this tool to rebuild and restart
+3. Test that the new container works
+4. If working: commit the changes (this finalizes the new image)
+5. If broken: wait for 30-min git rollback (container will also rollback automatically)`,
+        {},
+        async () => {
+          if (!isMain) {
+            return {
+              content: [{
+                type: 'text',
+                text: 'Error: Only the main channel can rebuild containers.'
+              }]
+            };
+          }
+
+          const data = {
+            type: 'rebuild_container',
+            groupFolder,
+            timestamp: new Date().toISOString()
+          };
+
+          writeIpcFile(TASKS_DIR, data);
+
+          return {
+            content: [{
+              type: 'text',
+              text: 'Container rebuild requested. Will backup current image and build new one.'
+            }]
+          };
+        }
       )
     ]
   });

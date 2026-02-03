@@ -13,7 +13,8 @@ import {
   TRIGGER_PATTERN,
   MAIN_GROUP_FOLDER,
   IPC_POLL_INTERVAL,
-  TIMEZONE
+  TIMEZONE,
+  CONTAINER_IMAGE
 } from './config.js';
 import { RegisteredGroup, Session, NewMessage } from './types.js';
 import { initDatabase, storeMessage, storeChatMetadata, getNewMessages, getMessagesSince, getAllTasks, updateChatName, getAllChats } from './db.js';
@@ -32,6 +33,106 @@ let sessions: Session = {};
 let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, string> = {};
 
+// === Container Rebuild State ===
+interface ContainerRebuildState {
+  hasBackup: boolean;
+  lastBackupTime?: string;
+}
+
+let containerRebuildState: ContainerRebuildState = { hasBackup: false };
+const CONTAINER_STATE_PATH = path.join(DATA_DIR, 'container_state.json');
+
+function loadContainerState(): void {
+  containerRebuildState = loadJson<ContainerRebuildState>(CONTAINER_STATE_PATH, { hasBackup: false });
+}
+
+function saveContainerState(): void {
+  saveJson(CONTAINER_STATE_PATH, containerRebuildState);
+}
+
+// Extract image name without tag from CONTAINER_IMAGE (e.g., "nanoclaw-agent:latest" -> "nanoclaw-agent")
+function getContainerImageName(): string {
+  return CONTAINER_IMAGE.split(':')[0];
+}
+
+function backupCurrentImage(): boolean {
+  try {
+    const imageName = getContainerImageName();
+    execSync(`container image tag ${imageName}:latest ${imageName}:backup`, { stdio: 'pipe' });
+    containerRebuildState = { hasBackup: true, lastBackupTime: new Date().toISOString() };
+    saveContainerState();
+    logger.info({ imageName }, 'Container image backed up to :backup tag');
+    return true;
+  } catch (err) {
+    logger.error({ err }, 'Failed to backup container image');
+    return false;
+  }
+}
+
+function buildNewImage(): boolean {
+  try {
+    logger.info('Building new container image...');
+    execSync('./container/build.sh', { cwd: process.cwd(), stdio: 'pipe', timeout: 300000 }); // 5 min timeout
+    logger.info('Container image built successfully');
+    return true;
+  } catch (err) {
+    logger.error({ err }, 'Failed to build container image');
+    return false;
+  }
+}
+
+function rollbackContainerImage(): boolean {
+  if (!containerRebuildState.hasBackup) {
+    logger.warn('No backup image available for rollback');
+    return false;
+  }
+  try {
+    const imageName = getContainerImageName();
+    execSync(`container image tag ${imageName}:backup ${imageName}:latest`, { stdio: 'pipe' });
+    logger.info({ imageName }, 'Container image rolled back to :backup');
+    return true;
+  } catch (err) {
+    logger.error({ err }, 'Failed to rollback container image');
+    return false;
+  }
+}
+
+async function handleContainerRebuild(sourceGroup: string): Promise<void> {
+  logger.info({ sourceGroup }, 'Container rebuild requested');
+
+  // Find the chat JID for the main group to send notifications
+  const mainJid = Object.entries(registeredGroups).find(([, g]) => g.folder === MAIN_GROUP_FOLDER)?.[0];
+
+  // 1. Backup current :latest to :backup
+  if (!backupCurrentImage()) {
+    if (mainJid) {
+      await sendMessage(mainJid, '❌ Container rebuild failed: Could not backup current image.');
+    }
+    return;
+  }
+
+  // 2. Build new image
+  if (!buildNewImage()) {
+    logger.warn('Build failed, rolling back to backup image...');
+    rollbackContainerImage();
+    if (mainJid) {
+      await sendMessage(mainJid, '❌ Container rebuild failed: Build error. Rolled back to previous image.');
+    }
+    return;
+  }
+
+  // 3. Success - notify and restart
+  if (mainJid) {
+    await sendMessage(mainJid, '✅ Container rebuilt successfully. Restarting service to use new image...');
+  }
+
+  // Delay restart to allow notification to be sent
+  setTimeout(() => {
+    logger.info('Restarting service after container rebuild...');
+    process.exit(0); // launchd will restart us
+  }, 2000);
+}
+
 async function setTyping(chatId: string, isTyping: boolean): Promise<void> {
   if (!isTyping) return; // Telegram doesn't have a "stop typing" action
   try {
@@ -48,6 +149,7 @@ function loadState(): void {
   lastAgentTimestamp = state.last_agent_timestamp || {};
   sessions = loadJson(path.join(DATA_DIR, 'sessions.json'), {});
   registeredGroups = loadJson(path.join(DATA_DIR, 'registered_groups.json'), {});
+  loadContainerState();
   logger.info({ groupCount: Object.keys(registeredGroups).length }, 'State loaded');
 }
 
@@ -516,6 +618,15 @@ async function processTaskIpc(
       }, 2000);
       break;
 
+    case 'rebuild_container':
+      // Only main group can rebuild containers
+      if (!isMain) {
+        logger.warn({ sourceGroup }, 'Unauthorized rebuild_container attempt blocked');
+        break;
+      }
+      await handleContainerRebuild(sourceGroup);
+      break;
+
     default:
       logger.warn({ type: data.type }, 'Unknown IPC task type');
   }
@@ -627,7 +738,17 @@ function rollbackChanges(): void {
     logger.warn('Rolling back uncommitted code changes...');
     execSync('git checkout .', { cwd: process.cwd(), stdio: 'pipe' });
     execSync('git clean -fd', { cwd: process.cwd(), stdio: 'pipe' });
-    logger.info('Code changes rolled back successfully');
+
+    // Also rollback container image if we have a backup
+    if (containerRebuildState.hasBackup) {
+      logger.warn('Rolling back container image to :backup...');
+      if (rollbackContainerImage()) {
+        containerRebuildState = { hasBackup: false };
+        saveContainerState();
+      }
+    }
+
+    logger.info('Code and container changes rolled back successfully');
   } catch (err) {
     logger.error({ err }, 'Failed to rollback code changes');
   }
