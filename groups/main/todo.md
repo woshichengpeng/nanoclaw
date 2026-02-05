@@ -4,7 +4,7 @@
 
 - [ ] 🔴 取消 Avis 租车订单 - 有两个订单，通过 Visa 预订的
 - [ ] 🟡 Stop hook 强制 commit - 回复前检查未 commit 改动，有则 block → [设计文档](docs/commit-hook-design.md)
-- [x] 🟡 智能吃药提醒 - 已实现，用链式 schedule_task：每次提醒都预约10分钟后的跟进，用户确认后取消
+- [x] 🟡 智能吃药提醒 - 已实现，改进版：定时任务只管发提醒+创建跟进，取消逻辑由用户回复触发（见 CLAUDE.md）
 
 ## Completed
 
