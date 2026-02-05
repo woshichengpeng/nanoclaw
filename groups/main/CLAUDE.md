@@ -97,6 +97,12 @@ Do NOT use markdown headings (##) in Telegram messages. Only use:
 
 Keep messages clean and readable for Telegram.
 
+## Medication Reminder
+
+When user replies with confirmation about taking medicine (e.g., "吃了", "吃完了", "已吃", "好", "ok", "done"), do this:
+1. Find and cancel any pending "吃药跟进提醒" tasks using `list_tasks` + `cancel_task`
+2. Reply with "👍"
+
 ---
 
 ## Admin Context
