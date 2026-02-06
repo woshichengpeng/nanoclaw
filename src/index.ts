@@ -17,7 +17,7 @@ import {
   GROUPS_DIR
 } from './config.js';
 import { RegisteredGroup, Session, NewMessage } from './types.js';
-import { initDatabase, storeMessage, storeChatMetadata, getNewMessages, getMessagesSince, getAllTasks, updateChatName, getAllChats } from './db.js';
+import { initDatabase, storeMessage, storeMessageDirect, storeChatMetadata, getNewMessages, getMessagesSince, getAllTasks, updateChatName, getAllChats, migrateAddChannelPrefix } from './db.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { runContainerAgent, writeTasksSnapshot, writeGroupsSnapshot, AvailableGroup } from './container-runner.js';
 import { loadJson, saveJson } from './utils.js';
@@ -130,9 +130,14 @@ async function handleContainerRebuild(sourceGroup: string): Promise<void> {
 }
 
 async function setTyping(chatId: string, isTyping: boolean): Promise<void> {
-  if (!isTyping) return; // Telegram doesn't have a "stop typing" action
+  if (!isTyping) return;
   try {
-    await telegrafBot.telegram.sendChatAction(chatId, 'typing');
+    if (chatId.startsWith('fs:')) {
+      // Feishu doesn't have a native typing indicator
+      return;
+    }
+    const tgId = chatId.startsWith('tg:') ? chatId.slice(3) : chatId;
+    await telegrafBot.telegram.sendChatAction(tgId, 'typing');
   } catch (err) {
     logger.debug({ chatId, err }, 'Failed to update typing status');
   }
@@ -315,7 +320,13 @@ async function runAgent(group: RegisteredGroup, prompt: string, chatJid: string)
 
 async function sendMessage(chatId: string, text: string): Promise<void> {
   try {
-    await telegrafBot.telegram.sendMessage(chatId, text);
+    if (chatId.startsWith('fs:')) {
+      const { feishuSendMessage } = await import('./feishu.js');
+      await feishuSendMessage(chatId.slice(3), text);
+    } else {
+      const tgId = chatId.startsWith('tg:') ? chatId.slice(3) : chatId;
+      await telegrafBot.telegram.sendMessage(tgId, text);
+    }
     logger.info({ chatId, length: text.length }, 'Message sent');
   } catch (err) {
     logger.error({ chatId, err }, 'Failed to send message');
@@ -347,12 +358,18 @@ async function sendFile(
   caption?: string
 ): Promise<void> {
   try {
-    const inputFile = Input.fromLocalFile(filePath);
-
-    if (isImage) {
-      await telegrafBot.telegram.sendPhoto(chatId, inputFile, { caption });
+    if (chatId.startsWith('fs:')) {
+      const { feishuSendFile } = await import('./feishu.js');
+      await feishuSendFile(chatId.slice(3), filePath, isImage, caption);
     } else {
-      await telegrafBot.telegram.sendDocument(chatId, inputFile, { caption });
+      const tgId = chatId.startsWith('tg:') ? chatId.slice(3) : chatId;
+      const inputFile = Input.fromLocalFile(filePath);
+
+      if (isImage) {
+        await telegrafBot.telegram.sendPhoto(tgId, inputFile, { caption });
+      } else {
+        await telegrafBot.telegram.sendDocument(tgId, inputFile, { caption });
+      }
     }
 
     logger.info({ chatId, filePath, isImage }, 'File sent');
@@ -720,7 +737,7 @@ async function downloadTelegramFile(fileId: string, groupFolder: string, fileNam
 function setupTelegram(): void {
   // Handle incoming messages (including text, photos, documents)
   telegrafBot.on('message', async (ctx) => {
-    const chatId = String(ctx.chat.id);
+    const chatId = 'tg:' + String(ctx.chat.id);
     const isGroup = ctx.chat.type === 'group' || ctx.chat.type === 'supergroup';
     const senderId = String(ctx.from?.id || ctx.chat.id);
     const senderName = ctx.from?.first_name || ctx.from?.username || 'User';
@@ -969,9 +986,22 @@ function ensureContainerSystemRunning(): void {
 async function main(): Promise<void> {
   ensureContainerSystemRunning();
   initDatabase();
+  migrateAddChannelPrefix();
   logger.info('Database initialized');
   loadState();
   setupTelegram();
+
+  // Optionally enable Feishu/Lark channel
+  if (process.env.FEISHU_APP_ID && process.env.FEISHU_APP_SECRET) {
+    const { setupFeishu } = await import('./feishu.js');
+    setupFeishu({
+      storeMessageDirect,
+      storeChatMetadata,
+      getGroupFolder: (chatJid: string) => registeredGroups[chatJid]?.folder,
+    });
+    logger.info('Feishu/Lark channel enabled');
+  }
+
   startRollbackMonitor();
 }
 

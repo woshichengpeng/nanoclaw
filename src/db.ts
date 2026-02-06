@@ -3,7 +3,9 @@ import fs from 'fs';
 import path from 'path';
 import { proto } from '@whiskeysockets/baileys';
 import { NewMessage, ScheduledTask, TaskRunLog } from './types.js';
-import { STORE_DIR } from './config.js';
+import { STORE_DIR, DATA_DIR } from './config.js';
+import { loadJson, saveJson } from './utils.js';
+import { logger } from './logger.js';
 
 let db: Database.Database;
 
@@ -178,6 +180,25 @@ export function storeMessage(msg: proto.IWebMessageInfo, chatJid: string, isFrom
     .run(msgId, chatJid, sender, senderName, content, timestamp, isFromMe ? 1 : 0, mediaPath || null, replyToContent || null);
 }
 
+/**
+ * Store a message directly without WhatsApp proto dependency.
+ * Used by non-WhatsApp channels (Telegram, Feishu, etc.).
+ */
+export function storeMessageDirect(params: {
+  id: string;
+  chatJid: string;
+  sender: string;
+  senderName: string;
+  content: string;
+  timestamp: string;
+  isFromMe: boolean;
+  mediaPath?: string;
+  replyToContent?: string;
+}): void {
+  db.prepare(`INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, media_path, reply_to_content) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    .run(params.id, params.chatJid, params.sender, params.senderName, params.content, params.timestamp, params.isFromMe ? 1 : 0, params.mediaPath || null, params.replyToContent || null);
+}
+
 export function getNewMessages(jids: string[], lastTimestamp: string, botPrefix: string): { messages: NewMessage[]; newTimestamp: string } {
   if (jids.length === 0) return { messages: [], newTimestamp: lastTimestamp };
 
@@ -296,4 +317,74 @@ export function getTaskRunLogs(taskId: string, limit = 10): TaskRunLog[] {
     ORDER BY run_at DESC
     LIMIT ?
   `).all(taskId, limit) as TaskRunLog[];
+}
+
+/**
+ * One-time migration: add 'tg:' prefix to all existing chat IDs.
+ * This enables multi-channel support (Telegram + Feishu).
+ * Idempotent — skips if already migrated (marker file).
+ */
+export function migrateAddChannelPrefix(): void {
+  const markerPath = path.join(DATA_DIR, '.migrated-channel-prefix');
+  if (fs.existsSync(markerPath)) return;
+
+  logger.info('Running one-time channel prefix migration...');
+
+  // 1. Migrate DB tables
+  db.exec(`
+    UPDATE chats SET jid = 'tg:' || jid
+    WHERE jid NOT LIKE 'tg:%' AND jid NOT LIKE 'fs:%' AND jid != '__group_sync__';
+
+    UPDATE messages SET chat_jid = 'tg:' || chat_jid
+    WHERE chat_jid NOT LIKE 'tg:%' AND chat_jid NOT LIKE 'fs:%';
+
+    UPDATE scheduled_tasks SET chat_jid = 'tg:' || chat_jid
+    WHERE chat_jid NOT LIKE 'tg:%' AND chat_jid NOT LIKE 'fs:%';
+  `);
+
+  // 2. Migrate registered_groups.json
+  const groupsPath = path.join(DATA_DIR, 'registered_groups.json');
+  if (fs.existsSync(groupsPath)) {
+    const groups = loadJson<Record<string, unknown>>(groupsPath, {});
+    const migrated: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(groups)) {
+      const newKey = (key.startsWith('tg:') || key.startsWith('fs:')) ? key : `tg:${key}`;
+      migrated[newKey] = value;
+    }
+    saveJson(groupsPath, migrated);
+    logger.info({ count: Object.keys(migrated).length }, 'Migrated registered_groups.json');
+  }
+
+  // 3. Migrate sessions.json
+  const sessionsPath = path.join(DATA_DIR, 'sessions.json');
+  if (fs.existsSync(sessionsPath)) {
+    const sessions = loadJson<Record<string, unknown>>(sessionsPath, {});
+    const migrated: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(sessions)) {
+      const newKey = (key.startsWith('tg:') || key.startsWith('fs:')) ? key : `tg:${key}`;
+      migrated[newKey] = value;
+    }
+    saveJson(sessionsPath, migrated);
+    logger.info({ count: Object.keys(migrated).length }, 'Migrated sessions.json');
+  }
+
+  // 4. Migrate router_state.json (last_agent_timestamp keys)
+  const statePath = path.join(DATA_DIR, 'router_state.json');
+  if (fs.existsSync(statePath)) {
+    const state = loadJson<{ last_timestamp?: string; last_agent_timestamp?: Record<string, string> }>(statePath, {});
+    if (state.last_agent_timestamp) {
+      const migrated: Record<string, string> = {};
+      for (const [key, value] of Object.entries(state.last_agent_timestamp)) {
+        const newKey = (key.startsWith('tg:') || key.startsWith('fs:')) ? key : `tg:${key}`;
+        migrated[newKey] = value;
+      }
+      state.last_agent_timestamp = migrated;
+      saveJson(statePath, state);
+      logger.info('Migrated router_state.json');
+    }
+  }
+
+  // Write marker
+  fs.writeFileSync(markerPath, new Date().toISOString());
+  logger.info('Channel prefix migration complete');
 }

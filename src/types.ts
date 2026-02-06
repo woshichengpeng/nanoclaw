@@ -38,6 +38,7 @@ export interface RegisteredGroup {
   folder: string;
   trigger: string;
   added_at: string;
+  channel?: 'telegram' | 'feishu';
   containerConfig?: ContainerConfig;
 }
 
