@@ -330,8 +330,10 @@ export function migrateAddChannelPrefix(): void {
 
   logger.info('Running one-time channel prefix migration...');
 
-  // 1. Migrate DB tables
+  // 1. Migrate DB tables (disable FK checks during migration)
   db.exec(`
+    PRAGMA foreign_keys = OFF;
+
     UPDATE chats SET jid = 'tg:' || jid
     WHERE jid NOT LIKE 'tg:%' AND jid NOT LIKE 'fs:%' AND jid != '__group_sync__';
 
@@ -340,6 +342,8 @@ export function migrateAddChannelPrefix(): void {
 
     UPDATE scheduled_tasks SET chat_jid = 'tg:' || chat_jid
     WHERE chat_jid NOT LIKE 'tg:%' AND chat_jid NOT LIKE 'fs:%';
+
+    PRAGMA foreign_keys = ON;
   `);
 
   // 2. Migrate registered_groups.json
