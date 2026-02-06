@@ -7,7 +7,6 @@ import { spawn } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import pino from 'pino';
 import {
   CONTAINER_IMAGE,
   CONTAINER_TIMEOUT,
@@ -15,13 +14,9 @@ import {
   GROUPS_DIR,
   DATA_DIR
 } from './config.js';
+import { logger } from './logger.js';
 import { RegisteredGroup } from './types.js';
 import { validateAdditionalMounts } from './mount-security.js';
-
-const logger = pino({
-  level: process.env.LOG_LEVEL || 'info',
-  transport: { target: 'pino-pretty', options: { colorize: true } }
-});
 
 // Sentinel markers for robust output parsing (must match agent-runner)
 const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';

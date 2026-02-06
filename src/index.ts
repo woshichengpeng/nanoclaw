@@ -1,6 +1,5 @@
 import 'dotenv/config';
 import { Telegraf, Input } from 'telegraf';
-import pino from 'pino';
 import { execSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
@@ -22,11 +21,7 @@ import { initDatabase, storeMessage, storeChatMetadata, getNewMessages, getMessa
 import { startSchedulerLoop } from './task-scheduler.js';
 import { runContainerAgent, writeTasksSnapshot, writeGroupsSnapshot, AvailableGroup } from './container-runner.js';
 import { loadJson, saveJson } from './utils.js';
-
-const logger = pino({
-  level: process.env.LOG_LEVEL || 'info',
-  transport: { target: 'pino-pretty', options: { colorize: true } }
-});
+import { logger } from './logger.js';
 
 const telegrafBot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN!);
 let lastTimestamp = '';
