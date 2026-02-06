@@ -3,6 +3,5 @@
 # Next merge: git fetch upstream && git log --oneline upstream/main --not <hash>
 #
 # Reviewed on: 2026-02-06
-# Merged: c9ca34a 1f8cd26 1179801 1a32bff 7ff9a65 3084fab (+ manual logger refactor, .prettierrc)
-# Skipped: 392ba62 (WhatsApp LID), 3a4d340 (WhatsApp reconnect), 21c66df (prettier reformat)
-3a4d340
+# Merged: db216a4 (container lifecycle management - manual apply)
+db216a4
