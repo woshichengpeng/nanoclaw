@@ -14,7 +14,10 @@ import {
   IPC_POLL_INTERVAL,
   TIMEZONE,
   CONTAINER_IMAGE,
-  GROUPS_DIR
+  GROUPS_DIR,
+  MODEL_ALIASES,
+  getModelOverride,
+  setModelOverride
 } from './config.js';
 import { RegisteredGroup, Session, NewMessage } from './types.js';
 import { initDatabase, storeMessage, storeMessageDirect, storeChatMetadata, getMessagesSince, getMessagesSinceRowId, getMaxRowIdBefore, getAllTasks, updateChatName, getAllChats, migrateAddChannelPrefix } from './db.js';
@@ -254,6 +257,79 @@ async function processMessage(msg: NewMessage): Promise<void> {
     saveState();
     logger.info({ group: group.name, chatJid: msg.chat_jid }, 'Session cleared by /newsession command');
     await sendMessage(msg.chat_jid, '✅ Session cleared. Next message will start a fresh conversation.');
+    return;
+  }
+
+  // Handle /help command - show available commands
+  if (content === '/help' || content.endsWith('/help')) {
+    const currentModel = getModelOverride() || process.env.ANTHROPIC_MODEL || '(default)';
+    await sendMessage(msg.chat_jid, [
+      '📋 Available commands:',
+      '',
+      '/help - Show this help',
+      '/model - Show current model',
+      '/model <name> - Switch model (opus, sonnet, haiku, or full ID)',
+      '/model default - Reset to default model',
+      '/newsession - Clear session, start fresh',
+      '',
+      `Current model: ${currentModel}`,
+    ].join('\n'));
+    return;
+  }
+
+  // Handle /model command - switch Claude model
+  const modelMatch = content.match(/^\/model(?:\s+(.+))?$/i);
+  if (modelMatch) {
+    const modelArg = modelMatch[1]?.trim();
+    if (!modelArg) {
+      const current = getModelOverride() || process.env.ANTHROPIC_MODEL || '(default)';
+      const aliases = Object.entries(MODEL_ALIASES).map(([k, v]) => `  ${k} → ${v}`).join('\n');
+      await sendMessage(msg.chat_jid, `Current model: ${current}\n\nAliases:\n${aliases}\n\nUsage: /model <name|full-model-id>\nReset: /model default`);
+      return;
+    }
+    if (modelArg.toLowerCase() === 'default' || modelArg.toLowerCase() === 'reset') {
+      setModelOverride(null);
+      const defaultModel = process.env.ANTHROPIC_MODEL || '(env default)';
+      logger.info({ chatJid: msg.chat_jid }, 'Model override cleared');
+      await sendMessage(msg.chat_jid, `✅ Model reset to default: ${defaultModel}`);
+      return;
+    }
+    const resolved = MODEL_ALIASES[modelArg.toLowerCase()] || modelArg;
+
+    // Validate model by making a minimal API call before saving
+    await sendMessage(msg.chat_jid, `🔄 Testing model: ${resolved}...`);
+    const baseUrl = (process.env.ANTHROPIC_BASE_URL || 'https://api.anthropic.com').replace(/\/+$/, '');
+    const apiKey = process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN || '';
+    try {
+      const resp = await fetch(`${baseUrl}/v1/messages`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': apiKey,
+          'anthropic-version': '2023-06-01',
+        },
+        body: JSON.stringify({
+          model: resolved,
+          max_tokens: 1,
+          messages: [{ role: 'user', content: 'hi' }],
+        }),
+        signal: AbortSignal.timeout(15000),
+      });
+      if (!resp.ok) {
+        const body = await resp.text().catch(() => '');
+        logger.warn({ model: resolved, status: resp.status, body }, 'Model validation failed');
+        await sendMessage(msg.chat_jid, `❌ Model unavailable: ${resolved}\nHTTP ${resp.status}: ${body.slice(0, 200)}`);
+        return;
+      }
+    } catch (err) {
+      logger.warn({ model: resolved, err }, 'Model validation request failed');
+      await sendMessage(msg.chat_jid, `❌ Cannot reach model: ${resolved}\n${err instanceof Error ? err.message : String(err)}`);
+      return;
+    }
+
+    setModelOverride(resolved);
+    logger.info({ chatJid: msg.chat_jid, model: resolved }, 'Model override set');
+    await sendMessage(msg.chat_jid, `✅ Model switched to: ${resolved}`);
     return;
   }
 

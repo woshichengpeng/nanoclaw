@@ -21,3 +21,6 @@ logs/
 .vscode/
 
 agents-sdk-docs
+
+# Ralph loop state
+.claude/ralph-loop.local.md

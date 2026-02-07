@@ -12,7 +12,8 @@ import {
   CONTAINER_TIMEOUT,
   CONTAINER_MAX_OUTPUT_SIZE,
   GROUPS_DIR,
-  DATA_DIR
+  DATA_DIR,
+  getModelOverride
 } from './config.js';
 import { logger } from './logger.js';
 import { RegisteredGroup } from './types.js';
@@ -142,6 +143,17 @@ function buildVolumeMounts(group: RegisteredGroup, isMain: boolean, chatJid?: st
       });
 
     if (filteredLines.length > 0) {
+      // Apply model override if set via /model command
+      const modelOverride = getModelOverride();
+      if (modelOverride) {
+        const idx = filteredLines.findIndex(l => l.trimStart().startsWith('ANTHROPIC_MODEL='));
+        if (idx !== -1) {
+          filteredLines[idx] = `ANTHROPIC_MODEL=${modelOverride}`;
+        } else {
+          filteredLines.push(`ANTHROPIC_MODEL=${modelOverride}`);
+        }
+      }
+
       fs.writeFileSync(path.join(envDir, 'env'), filteredLines.join('\n') + '\n');
       mounts.push({
         hostPath: envDir,
