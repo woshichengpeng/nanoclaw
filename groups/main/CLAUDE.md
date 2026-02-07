@@ -99,8 +99,12 @@ Keep messages clean and readable for Telegram.
 
 ## Medication Reminder
 
+The medication reminder system uses two cron tasks:
+- *Main reminder*: `cron 30 10 * * *` — sends "该吃药了" and resumes the follow-up cron
+- *Follow-up cron*: `cron */10 * * * *` — sends "还没吃药吗？" every 10 minutes (normally paused)
+
 When user replies with confirmation about taking medicine (e.g., "吃了", "吃完了", "已吃", "好", "ok", "done"), do this:
-1. Find and cancel any pending "吃药跟进提醒" tasks using `list_tasks` + `cancel_task`
+1. Find and *pause* (not cancel) the "吃药跟进cron提醒" task using `list_tasks` + `pause_task`
 2. Reply with "👍"
 
 ---
