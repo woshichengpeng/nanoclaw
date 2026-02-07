@@ -52,7 +52,7 @@ interface VolumeMount {
   readonly?: boolean;
 }
 
-function buildVolumeMounts(group: RegisteredGroup, isMain: boolean): VolumeMount[] {
+function buildVolumeMounts(group: RegisteredGroup, isMain: boolean, chatJid?: string): VolumeMount[] {
   const mounts: VolumeMount[] = [];
   const homeDir = getHomeDir();
   const projectRoot = process.cwd();
@@ -91,9 +91,10 @@ function buildVolumeMounts(group: RegisteredGroup, isMain: boolean): VolumeMount
     }
   }
 
-  // Per-group Claude sessions directory (isolated from other groups)
-  // Each group gets their own .claude/ to prevent cross-group session access
-  const groupSessionsDir = path.join(DATA_DIR, 'sessions', group.folder, '.claude');
+  // Per-chatJid Claude sessions directory (isolated from other groups AND platforms)
+  // Each chat_jid gets their own .claude/ to prevent cross-platform session context leaking
+  const sanitizedJid = (chatJid || group.folder).replace(/[^a-zA-Z0-9_-]/g, '_');
+  const groupSessionsDir = path.join(DATA_DIR, 'sessions', group.folder, sanitizedJid, '.claude');
   fs.mkdirSync(groupSessionsDir, { recursive: true });
   mounts.push({
     hostPath: groupSessionsDir,
@@ -189,7 +190,7 @@ export async function runContainerAgent(
   const groupDir = path.join(GROUPS_DIR, group.folder);
   fs.mkdirSync(groupDir, { recursive: true });
 
-  const mounts = buildVolumeMounts(group, input.isMain);
+  const mounts = buildVolumeMounts(group, input.isMain, input.chatJid);
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-${safeName}-${Date.now()}`;
   const containerArgs = buildContainerArgs(mounts, containerName);
