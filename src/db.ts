@@ -232,6 +232,26 @@ export function getMessagesSince(chatJid: string, sinceTimestamp: string, botPre
   return db.prepare(sql).all(chatJid, sinceTimestamp, `${botPrefix}:%`) as NewMessage[];
 }
 
+export function getMessagesSinceRowId(chatJid: string, sinceRowId: number, botPrefix: string): NewMessage[] {
+  const sql = `
+    SELECT rowid as row_id, id, chat_jid, sender, sender_name, content, timestamp, media_path, reply_to_content
+    FROM messages
+    WHERE chat_jid = ? AND rowid > ? AND content NOT LIKE ?
+    ORDER BY rowid
+  `;
+  return db.prepare(sql).all(chatJid, sinceRowId, `${botPrefix}:%`) as NewMessage[];
+}
+
+export function getMaxRowIdBefore(chatJid: string, timestamp: string, botPrefix: string): number {
+  const sql = `
+    SELECT MAX(rowid) as max_rowid
+    FROM messages
+    WHERE chat_jid = ? AND timestamp <= ? AND content NOT LIKE ?
+  `;
+  const row = db.prepare(sql).get(chatJid, timestamp, `${botPrefix}:%`) as { max_rowid?: number } | undefined;
+  return row?.max_rowid ?? 0;
+}
+
 export function createTask(task: Omit<ScheduledTask, 'last_run' | 'last_result'>): void {
   db.prepare(`
     INSERT INTO scheduled_tasks (id, group_folder, chat_jid, prompt, schedule_type, schedule_value, context_mode, next_run, status, created_at)

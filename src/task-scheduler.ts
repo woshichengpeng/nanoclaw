@@ -11,6 +11,7 @@ export interface SchedulerDependencies {
   sendMessage: (jid: string, text: string) => Promise<void>;
   registeredGroups: () => Record<string, RegisteredGroup>;
   getSessions: () => Record<string, string>;
+  processIpcMessages: (groupFolder: string, isMain: boolean) => Promise<string[]>;
 }
 
 async function runTask(task: ScheduledTask, deps: SchedulerDependencies): Promise<void> {
@@ -76,6 +77,12 @@ async function runTask(task: ScheduledTask, deps: SchedulerDependencies): Promis
   } catch (err) {
     error = err instanceof Error ? err.message : String(err);
     logger.error({ taskId: task.id, error }, 'Task failed');
+  }
+
+  try {
+    await deps.processIpcMessages(task.group_folder, isMain);
+  } catch (err) {
+    logger.error({ taskId: task.id, err }, 'Error processing IPC messages for scheduled task');
   }
 
   const durationMs = Date.now() - startTime;

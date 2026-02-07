@@ -47,6 +47,7 @@ export interface Session {
 }
 
 export interface NewMessage {
+  row_id?: number;
   id: string;
   chat_jid: string;
   sender: string;

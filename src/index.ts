@@ -17,7 +17,7 @@ import {
   GROUPS_DIR
 } from './config.js';
 import { RegisteredGroup, Session, NewMessage } from './types.js';
-import { initDatabase, storeMessage, storeMessageDirect, storeChatMetadata, getNewMessages, getMessagesSince, getAllTasks, updateChatName, getAllChats, migrateAddChannelPrefix } from './db.js';
+import { initDatabase, storeMessage, storeMessageDirect, storeChatMetadata, getMessagesSince, getMessagesSinceRowId, getMaxRowIdBefore, getAllTasks, updateChatName, getAllChats, migrateAddChannelPrefix } from './db.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { runContainerAgent, writeTasksSnapshot, writeGroupsSnapshot, AvailableGroup } from './container-runner.js';
 import { loadJson, saveJson } from './utils.js';
@@ -25,6 +25,8 @@ import { logger } from './logger.js';
 
 const telegrafBot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN!);
 let lastTimestamp = '';
+let lastTimestampByChat: Record<string, string> = {};
+let lastRowIdByChat: Record<string, number> = {};
 let sessions: Session = {};
 let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, string> = {};
@@ -145,8 +147,15 @@ async function setTyping(chatId: string, isTyping: boolean): Promise<void> {
 
 function loadState(): void {
   const statePath = path.join(DATA_DIR, 'router_state.json');
-  const state = loadJson<{ last_timestamp?: string; last_agent_timestamp?: Record<string, string> }>(statePath, {});
+  const state = loadJson<{
+    last_timestamp?: string;
+    last_timestamp_by_chat?: Record<string, string>;
+    last_row_id_by_chat?: Record<string, number>;
+    last_agent_timestamp?: Record<string, string>;
+  }>(statePath, {});
   lastTimestamp = state.last_timestamp || '';
+  lastTimestampByChat = state.last_timestamp_by_chat || {};
+  lastRowIdByChat = state.last_row_id_by_chat || {};
   lastAgentTimestamp = state.last_agent_timestamp || {};
   sessions = loadJson(path.join(DATA_DIR, 'sessions.json'), {});
   registeredGroups = loadJson(path.join(DATA_DIR, 'registered_groups.json'), {});
@@ -155,10 +164,29 @@ function loadState(): void {
 }
 
 function saveState(): void {
-  saveJson(path.join(DATA_DIR, 'router_state.json'), { last_timestamp: lastTimestamp, last_agent_timestamp: lastAgentTimestamp });
+  saveJson(path.join(DATA_DIR, 'router_state.json'), {
+    last_timestamp: lastTimestamp,
+    last_timestamp_by_chat: lastTimestampByChat,
+    last_row_id_by_chat: lastRowIdByChat,
+    last_agent_timestamp: lastAgentTimestamp
+  });
   saveJson(path.join(DATA_DIR, 'sessions.json'), sessions);
 }
 
+type Channel = 'telegram' | 'feishu';
+
+function getChannelFromJid(jid: string): Channel | null {
+  if (jid.startsWith('tg:')) return 'telegram';
+  if (jid.startsWith('fs:')) return 'feishu';
+  return null;
+}
+
+function normalizeChatJid(jid: string): { jid: string; channel: Channel | null } {
+  const trimmed = jid.trim();
+  const channel = getChannelFromJid(trimmed);
+  if (channel) return { jid: trimmed, channel };
+  return { jid: `tg:${trimmed}`, channel: 'telegram' };
+}
 function registerGroup(jid: string, group: RegisteredGroup): void {
   registeredGroups[jid] = group;
   saveJson(path.join(DATA_DIR, 'registered_groups.json'), registeredGroups);
@@ -168,6 +196,22 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
   fs.mkdirSync(path.join(groupDir, 'logs'), { recursive: true });
 
   logger.info({ jid, name: group.name, folder: group.folder }, 'Group registered');
+}
+
+function resolveTaskChatJid(requesterJid: string | undefined, targetGroup: string): string | undefined {
+  if (requesterJid) {
+    const requesterGroup = registeredGroups[requesterJid];
+    if (requesterGroup && requesterGroup.folder === targetGroup) {
+      return requesterJid;
+    }
+  }
+
+  const candidates = Object.entries(registeredGroups)
+    .filter(([, group]) => group.folder === targetGroup)
+    .map(([jid]) => jid)
+    .sort();
+
+  return candidates[0];
 }
 
 /**
@@ -476,59 +520,9 @@ function startIpcWatcher(): void {
 
     for (const sourceGroup of groupFolders) {
       const isMain = sourceGroup === MAIN_GROUP_FOLDER;
-      const messagesDir = path.join(ipcBaseDir, sourceGroup, 'messages');
       const tasksDir = path.join(ipcBaseDir, sourceGroup, 'tasks');
 
-      // Process messages from this group's IPC directory
-      try {
-        if (fs.existsSync(messagesDir)) {
-          const messageFiles = fs.readdirSync(messagesDir).filter(f => f.endsWith('.json'));
-          for (const file of messageFiles) {
-            const filePath = path.join(messagesDir, file);
-            try {
-              const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-
-              // Authorization: verify this group can send to this chatJid
-              const targetGroup = registeredGroups[data.chatJid];
-              const isAuthorized = isMain || (targetGroup && targetGroup.folder === sourceGroup);
-
-              if (data.type === 'message' && data.chatJid && data.text) {
-                if (isAuthorized) {
-                  // If broadcast flag is set (scheduled tasks), send to all JIDs for this group
-                  const targetJids = data.broadcast ? getJidsForGroup(sourceGroup) : [data.chatJid];
-                  for (const jid of targetJids) {
-                    await sendMessage(jid, data.text);
-                  }
-                  logger.info({ chatJid: data.chatJid, sourceGroup, broadcast: !!data.broadcast, targets: targetJids.length }, 'IPC message sent');
-                } else {
-                  logger.warn({ chatJid: data.chatJid, sourceGroup }, 'Unauthorized IPC message attempt blocked');
-                }
-              } else if (data.type === 'file' && data.chatJid && data.filePath) {
-                if (isAuthorized) {
-                  const hostPath = containerPathToHostPath(data.filePath, sourceGroup);
-                  // If broadcast flag is set (scheduled tasks), send to all JIDs for this group
-                  const targetJids = data.broadcast ? getJidsForGroup(sourceGroup) : [data.chatJid];
-                  for (const jid of targetJids) {
-                    await sendFile(jid, hostPath, data.isImage, data.caption);
-                  }
-                  logger.info({ chatJid: data.chatJid, sourceGroup, filePath: hostPath, broadcast: !!data.broadcast, targets: targetJids.length }, 'IPC file sent');
-                } else {
-                  logger.warn({ chatJid: data.chatJid, sourceGroup }, 'Unauthorized IPC file attempt blocked');
-                }
-              }
-              fs.unlinkSync(filePath);
-            } catch (err) {
-              logger.error({ file, sourceGroup, err }, 'Error processing IPC message');
-              const errorDir = path.join(ipcBaseDir, 'errors');
-              fs.mkdirSync(errorDir, { recursive: true });
-              fs.renameSync(filePath, path.join(errorDir, `${sourceGroup}-${file}`));
-            }
-          }
-        }
-      } catch (err) {
-        logger.error({ err, sourceGroup }, 'Error reading IPC messages directory');
-      }
-
+      // IPC message files are handled inline after agent runs to preserve send_message precedence.
       // Process tasks from this group's IPC directory
       try {
         if (fs.existsSync(tasksDir)) {
@@ -594,10 +588,8 @@ async function processTaskIpc(
           break;
         }
 
-        // Resolve the correct JID for the target group (don't trust IPC payload)
-        const targetJid = Object.entries(registeredGroups).find(
-          ([, group]) => group.folder === targetGroup
-        )?.[0];
+        // Resolve the correct JID for the target group (prefer requester if it matches)
+        const targetJid = resolveTaskChatJid(data.chatJid, targetGroup);
 
         if (!targetJid) {
           logger.warn({ targetGroup }, 'Cannot schedule task: target group not registered');
@@ -708,11 +700,34 @@ async function processTaskIpc(
         break;
       }
       if (data.jid && data.name && data.folder && data.trigger) {
-        registerGroup(data.jid, {
+        const { jid: normalizedJid, channel } = normalizeChatJid(data.jid);
+        if (!channel) {
+          logger.warn({ jid: data.jid }, 'Invalid jid format for register_group');
+          break;
+        }
+
+        if (channel === 'feishu' && data.folder === MAIN_GROUP_FOLDER) {
+          logger.warn({ jid: normalizedJid, folder: data.folder }, 'Feishu group cannot be registered as main');
+          break;
+        }
+
+        const crossChannelConflict = Object.entries(registeredGroups).find(
+          ([existingJid, group]) =>
+            group.folder === data.folder &&
+            getChannelFromJid(existingJid) &&
+            getChannelFromJid(existingJid) !== channel
+        );
+        if (crossChannelConflict) {
+          logger.warn({ folder: data.folder, existingJid: crossChannelConflict[0], newJid: normalizedJid }, 'Cross-channel folder reuse blocked');
+          break;
+        }
+
+        registerGroup(normalizedJid, {
           name: data.name,
           folder: data.folder,
           trigger: data.trigger,
           added_at: new Date().toISOString(),
+          channel,
           containerConfig: data.containerConfig
         });
       } else {
@@ -870,7 +885,8 @@ function setupTelegram(): void {
   startSchedulerLoop({
     sendMessage,
     registeredGroups: () => registeredGroups,
-    getSessions: () => sessions
+    getSessions: () => sessions,
+    processIpcMessages: processGroupIpcMessages
   });
   startIpcWatcher();
   startMessageLoop();
@@ -882,19 +898,39 @@ async function startMessageLoop(): Promise<void> {
   while (true) {
     try {
       const jids = Object.keys(registeredGroups);
-      const { messages } = getNewMessages(jids, lastTimestamp, ASSISTANT_NAME);
-
-      if (messages.length > 0) logger.info({ count: messages.length }, 'New messages');
-      for (const msg of messages) {
-        try {
-          await processMessage(msg);
-          // Only advance timestamp after successful processing for at-least-once delivery
-          lastTimestamp = msg.timestamp;
+      for (const jid of jids) {
+        let sinceRowId = lastRowIdByChat[jid];
+        if (sinceRowId === undefined) {
+          const sinceTimestamp = lastTimestampByChat[jid] || lastTimestamp || '';
+          sinceRowId = sinceTimestamp
+            ? getMaxRowIdBefore(jid, sinceTimestamp, ASSISTANT_NAME)
+            : 0;
+          lastRowIdByChat[jid] = sinceRowId;
           saveState();
-        } catch (err) {
-          logger.error({ err, msg: msg.id }, 'Error processing message, will retry');
-          // Stop processing this batch - failed message will be retried next loop
-          break;
+        }
+
+        const messages = getMessagesSinceRowId(jid, sinceRowId, ASSISTANT_NAME);
+        if (messages.length > 0) {
+          logger.info({ chatJid: jid, count: messages.length }, 'New messages');
+        }
+
+        for (const msg of messages) {
+          try {
+            await processMessage(msg);
+            // Only advance cursor after successful processing for at-least-once delivery
+            if (typeof msg.row_id === 'number') {
+              lastRowIdByChat[jid] = msg.row_id;
+            }
+            lastTimestampByChat[jid] = msg.timestamp;
+            if (!lastTimestamp || msg.timestamp > lastTimestamp) {
+              lastTimestamp = msg.timestamp;
+            }
+            saveState();
+          } catch (err) {
+            logger.error({ err, msg: msg.id }, 'Error processing message, will retry');
+            // Stop processing this chat - failed message will be retried next loop
+            break;
+          }
         }
       }
     } catch (err) {
