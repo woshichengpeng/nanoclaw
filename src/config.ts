@@ -27,5 +27,5 @@ function escapeRegex(str: string): string {
 export const TRIGGER_PATTERN = new RegExp(`^@${escapeRegex(ASSISTANT_NAME)}\\b`, 'i');
 
 // Timezone for scheduled tasks (cron expressions, etc.)
-// Uses system timezone by default
-export const TIMEZONE = process.env.TZ || Intl.DateTimeFormat().resolvedOptions().timeZone;
+// Default to Asia/Shanghai (Beijing time) if not set
+export const TIMEZONE = process.env.TZ || 'Asia/Shanghai';
