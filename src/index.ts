@@ -206,9 +206,9 @@ async function processMessage(msg: NewMessage): Promise<void> {
 
   // Handle /newsession command - start a fresh session
   if (content === '/newsession' || content.endsWith('/newsession')) {
-    delete sessions[group.folder];
+    delete sessions[msg.chat_jid];
     saveState();
-    logger.info({ group: group.name }, 'Session cleared by /newsession command');
+    logger.info({ group: group.name, chatJid: msg.chat_jid }, 'Session cleared by /newsession command');
     await sendMessage(msg.chat_jid, '✅ Session cleared. Next message will start a fresh conversation.');
     return;
   }
@@ -274,7 +274,9 @@ async function processMessage(msg: NewMessage): Promise<void> {
 
 async function runAgent(group: RegisteredGroup, prompt: string, chatJid: string): Promise<string | null> {
   const isMain = group.folder === MAIN_GROUP_FOLDER;
-  const sessionId = sessions[group.folder];
+  // Use chat_jid as session key so each platform gets its own session context
+  const sessionKey = chatJid;
+  const sessionId = sessions[sessionKey];
 
   // Update tasks snapshot for container to read (filtered by group)
   const tasks = getAllTasks();
@@ -302,7 +304,7 @@ async function runAgent(group: RegisteredGroup, prompt: string, chatJid: string)
     });
 
     if (output.newSessionId) {
-      sessions[group.folder] = output.newSessionId;
+      sessions[sessionKey] = output.newSessionId;
       saveJson(path.join(DATA_DIR, 'sessions.json'), sessions);
     }
 
