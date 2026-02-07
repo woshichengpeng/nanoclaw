@@ -61,6 +61,19 @@ For tasks that take more than 10 seconds (research, multiple steps, file operati
 
 **Important:** Don't duplicate the answer. Either use send_message for the full answer OR return it at the end, not both.
 
+## 待办（Todo）与提醒（Scheduled Tasks）约定
+
+**待办清单文件：**`/workspace/group/todo.md` 是用户的主待办列表（默认数据源）。
+
+**当用户询问"有啥待办 / 有什么没做 / pending / to-do / 任务有哪些"等：**
+1. **先打开并读取** `/workspace/group/todo.md`，汇总未完成条目。
+2. **再检查定时任务/提醒**（cron/已安排的 schedule），作为"已安排提醒/将到期事项"的补充。
+3. 若 `todo.md` 不存在或为空：说明未找到待办文件，并询问是否需要新建。
+
+**当用户添加/完成/更新待办：**
+- 优先写入并维护 `/workspace/group/todo.md`。
+- 如用户要求提醒时间，再额外创建对应的 schedule。
+
 ## Memory
 
 The `conversations/` folder contains searchable history of past conversations. Use this to recall context from previous sessions.
