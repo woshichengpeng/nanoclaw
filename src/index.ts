@@ -22,7 +22,7 @@ import {
 import { RegisteredGroup, Session, NewMessage } from './types.js';
 import { initDatabase, storeMessage, storeMessageDirect, storeChatMetadata, getMessagesSince, getMessagesSinceRowId, getMaxRowIdBefore, getAllTasks, updateChatName, getAllChats, migrateAddChannelPrefix } from './db.js';
 import { startSchedulerLoop } from './task-scheduler.js';
-import { runContainerAgent, writeTasksSnapshot, writeGroupsSnapshot, AvailableGroup } from './container-runner.js';
+import { AgentResponse, runContainerAgent, writeTasksSnapshot, writeGroupsSnapshot, AvailableGroup } from './container-runner.js';
 import { loadJson, saveJson } from './utils.js';
 import { logger } from './logger.js';
 
@@ -333,8 +333,8 @@ async function processMessage(msg: NewMessage): Promise<void> {
     return;
   }
 
-  // Main group responds to all messages; other groups require trigger prefix
-  if (!isMainGroup && !TRIGGER_PATTERN.test(content)) return;
+  // Main group responds to all messages; for non-main groups, check if trigger is required and present
+  if (!isMainGroup && group.requiresTrigger !== false && !TRIGGER_PATTERN.test(content)) return;
 
   // Get all messages since last agent interaction so the session has full context
   const sinceTimestamp = lastAgentTimestamp[msg.chat_jid] || '';
@@ -366,11 +366,16 @@ async function processMessage(msg: NewMessage): Promise<void> {
     setTyping(msg.chat_jid, true).catch(() => {});
   }, 4000);
 
-  let response: string | null;
+  let response: AgentResponse | 'error';
   try {
     response = await runAgent(group, prompt, msg.chat_jid);
   } finally {
     clearInterval(typingInterval);
+  }
+
+  if (response === 'error') {
+    // Container or agent error — don't advance cursor, will retry
+    return;
   }
 
   // Process any IPC messages from this agent run BEFORE deciding to send result
@@ -378,21 +383,24 @@ async function processMessage(msg: NewMessage): Promise<void> {
   const ipcMessagesSent = await processGroupIpcMessages(group.folder, isMainGroup);
   const sentToThisChat = ipcMessagesSent.includes(msg.chat_jid);
 
-  // Only send result if no IPC message was already sent for this chat
-  if (response && !sentToThisChat) {
-    lastAgentTimestamp[msg.chat_jid] = msg.timestamp;
-    // Telegram bot sends as itself, no ASSISTANT_NAME prefix needed
-    await sendMessage(msg.chat_jid, response);
-  } else {
-    // IPC message was sent (or no response), just update timestamp
-    lastAgentTimestamp[msg.chat_jid] = msg.timestamp;
-    if (sentToThisChat) {
-      logger.debug({ chatJid: msg.chat_jid }, 'Skipping result send - IPC message already sent');
-    }
+  // Update timestamp — agent processed successfully (whether it responded or stayed silent)
+  lastAgentTimestamp[msg.chat_jid] = msg.timestamp;
+
+  if (response.outputType === 'message' && response.userMessage && !sentToThisChat) {
+    await sendMessage(msg.chat_jid, response.userMessage);
+  } else if (sentToThisChat) {
+    logger.debug({ chatJid: msg.chat_jid }, 'Skipping result send - IPC message already sent');
+  }
+
+  if (response.internalLog) {
+    logger.info(
+      { group: group.name, outputType: response.outputType },
+      `Agent: ${response.internalLog}`,
+    );
   }
 }
 
-async function runAgent(group: RegisteredGroup, prompt: string, chatJid: string): Promise<string | null> {
+async function runAgent(group: RegisteredGroup, prompt: string, chatJid: string): Promise<AgentResponse | 'error'> {
   const isMain = group.folder === MAIN_GROUP_FOLDER;
   // Use chat_jid as session key so each platform gets its own session context
   const sessionKey = chatJid;
@@ -430,13 +438,13 @@ async function runAgent(group: RegisteredGroup, prompt: string, chatJid: string)
 
     if (output.status === 'error') {
       logger.error({ group: group.name, error: output.error }, 'Container agent error');
-      return null;
+      return 'error';
     }
 
-    return output.result;
+    return output.result ?? { outputType: 'log' };
   } catch (err) {
     logger.error({ group: group.name, err }, 'Agent error');
-    return null;
+    return 'error';
   }
 }
 
@@ -640,6 +648,7 @@ async function processTaskIpc(
     context_mode?: string;
     groupFolder?: string;
     chatJid?: string;
+    targetJid?: string;
     // For register_group
     jid?: string;
     name?: string;
@@ -656,19 +665,33 @@ async function processTaskIpc(
 
   switch (data.type) {
     case 'schedule_task':
-      if (data.prompt && data.schedule_type && data.schedule_value && data.groupFolder) {
-        // Authorization: non-main groups can only schedule for themselves
-        const targetGroup = data.groupFolder;
-        if (!isMain && targetGroup !== sourceGroup) {
-          logger.warn({ sourceGroup, targetGroup }, 'Unauthorized schedule_task attempt blocked');
-          break;
+      if (data.prompt && data.schedule_type && data.schedule_value && (data.targetJid || data.groupFolder)) {
+        // Support both new targetJid and legacy groupFolder
+        let targetGroup: string;
+        let targetJid: string | undefined;
+
+        if (data.targetJid) {
+          // New style: resolve group from JID
+          const targetGroupEntry = registeredGroups[data.targetJid];
+          if (!targetGroupEntry) {
+            logger.warn({ targetJid: data.targetJid }, 'Cannot schedule task: target group not registered');
+            break;
+          }
+          targetGroup = targetGroupEntry.folder;
+          targetJid = data.targetJid;
+        } else {
+          // Legacy style: groupFolder
+          targetGroup = data.groupFolder!;
+          targetJid = resolveTaskChatJid(data.chatJid, targetGroup);
+          if (!targetJid) {
+            logger.warn({ targetGroup }, 'Cannot schedule task: target group not registered');
+            break;
+          }
         }
 
-        // Resolve the correct JID for the target group (prefer requester if it matches)
-        const targetJid = resolveTaskChatJid(data.chatJid, targetGroup);
-
-        if (!targetJid) {
-          logger.warn({ targetGroup }, 'Cannot schedule task: target group not registered');
+        // Authorization: non-main groups can only schedule for themselves
+        if (!isMain && targetGroup !== sourceGroup) {
+          logger.warn({ sourceGroup, targetGroup }, 'Unauthorized schedule_task attempt blocked');
           break;
         }
 

@@ -2,6 +2,15 @@
 # All commits up to and including this hash have been reviewed.
 # Next merge: git fetch upstream && git log --oneline upstream/main --not <hash>
 #
-# Reviewed on: 2026-02-06
-# Merged: db216a4 (container lifecycle management - manual apply)
-db216a4
+# Reviewed on: 2026-02-08
+# Merged (manual apply):
+#   ae17715 - structured agent output (outputFormat, AgentResponse, exponential backoff concept)
+#   44f0b3d - outputType rename, tool descriptions, target_group_jid, global CLAUDE.md injection, task scheduler userMessage
+#   8dd27bc - defend against missing structured output
+#   675ed30 - improve container error logging (full stdout/stderr on error)
+#   f26468c - requiresTrigger, agent-browser visibility (partial - skip setup skill WhatsApp changes)
+# Skipped:
+#   eac9a6a - superseded by ae17715 squash merge
+#   03df69e - superseded by ae17715 squash merge
+#   2ecda36 - trivial CLAUDE.md wording tweak, covered by 44f0b3d
+f26468c

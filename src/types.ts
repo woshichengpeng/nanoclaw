@@ -39,6 +39,7 @@ export interface RegisteredGroup {
   trigger: string;
   added_at: string;
   channel?: 'telegram' | 'feishu';
+  requiresTrigger?: boolean; // Default: true for groups, false for solo chats
   containerConfig?: ContainerConfig;
 }
 

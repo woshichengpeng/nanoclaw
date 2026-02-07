@@ -3,7 +3,14 @@ import path from 'path';
 import { CronExpressionParser } from 'cron-parser';
 import { getDueTasks, updateTaskAfterRun, logTaskRun, getTaskById, getAllTasks } from './db.js';
 import { ScheduledTask, RegisteredGroup } from './types.js';
-import { GROUPS_DIR, SCHEDULER_POLL_INTERVAL, DATA_DIR, MAIN_GROUP_FOLDER, TIMEZONE } from './config.js';
+import {
+  ASSISTANT_NAME,
+  GROUPS_DIR,
+  MAIN_GROUP_FOLDER,
+  SCHEDULER_POLL_INTERVAL,
+  DATA_DIR,
+  TIMEZONE,
+} from './config.js';
 import { runContainerAgent, writeTasksSnapshot } from './container-runner.js';
 import { logger } from './logger.js';
 
@@ -69,8 +76,11 @@ async function runTask(task: ScheduledTask, deps: SchedulerDependencies): Promis
 
     if (output.status === 'error') {
       error = output.error || 'Unknown error';
-    } else {
-      result = output.result;
+    } else if (output.result) {
+      if (output.result.outputType === 'message' && output.result.userMessage) {
+        await deps.sendMessage(task.chat_jid, `${ASSISTANT_NAME}: ${output.result.userMessage}`);
+      }
+      result = output.result.userMessage || output.result.internalLog || null;
     }
 
     logger.info({ taskId: task.id, durationMs: Date.now() - startTime }, 'Task completed');

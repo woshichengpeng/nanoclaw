@@ -40,9 +40,15 @@ export interface ContainerInput {
   isScheduledTask?: boolean;
 }
 
+export interface AgentResponse {
+  outputType: 'message' | 'log';
+  userMessage?: string;
+  internalLog?: string;
+}
+
 export interface ContainerOutput {
   status: 'success' | 'error';
-  result: string | null;
+  result: AgentResponse | null;
   newSessionId?: string;
   error?: string;
 }
@@ -325,7 +331,9 @@ export async function runContainerAgent(
         ``
       ];
 
-      if (isVerbose) {
+      const isError = code !== 0;
+
+      if (isVerbose || isError) {
         logLines.push(
           `=== Input ===`,
           JSON.stringify(input, null, 2),
@@ -352,14 +360,6 @@ export async function runContainerAgent(
           mounts.map(m => `${m.containerPath}${m.readonly ? ' (ro)' : ''}`).join('\n'),
           ``
         );
-
-        if (code !== 0) {
-          logLines.push(
-            `=== Stderr (last 500 chars) ===`,
-            stderr.slice(-500),
-            ``
-          );
-        }
       }
 
       fs.writeFileSync(logFile, logLines.join('\n'));
@@ -370,7 +370,8 @@ export async function runContainerAgent(
           group: group.name,
           code,
           duration,
-          stderr: stderr.slice(-500),
+          stderr,
+          stdout,
           logFile
         }, 'Container exited with error');
 
@@ -409,7 +410,8 @@ export async function runContainerAgent(
       } catch (err) {
         logger.error({
           group: group.name,
-          stdout: stdout.slice(-500),
+          stdout,
+          stderr,
           error: err
         }, 'Failed to parse container output');
 
