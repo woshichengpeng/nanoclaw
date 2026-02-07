@@ -298,7 +298,8 @@ async function main(): Promise<void> {
   const ipcMcp = createIpcMcp({
     chatJid: input.chatJid,
     groupFolder: input.groupFolder,
-    isMain: input.isMain
+    isMain: input.isMain,
+    isScheduledTask: input.isScheduledTask
   });
 
   let result: string | null = null;

@@ -17,6 +17,7 @@ export interface IpcMcpContext {
   chatJid: string;
   groupFolder: string;
   isMain: boolean;
+  isScheduledTask?: boolean;
 }
 
 function writeIpcFile(dir: string, data: object): string {
@@ -34,7 +35,7 @@ function writeIpcFile(dir: string, data: object): string {
 }
 
 export function createIpcMcp(ctx: IpcMcpContext) {
-  const { chatJid, groupFolder, isMain } = ctx;
+  const { chatJid, groupFolder, isMain, isScheduledTask } = ctx;
 
   return createSdkMcpServer({
     name: 'nanoclaw',
@@ -52,6 +53,7 @@ export function createIpcMcp(ctx: IpcMcpContext) {
             chatJid,
             text: args.text,
             groupFolder,
+            broadcast: !!isScheduledTask,
             timestamp: new Date().toISOString()
           };
 
@@ -113,6 +115,7 @@ Size limits: 10 MB for photos, 50 MB for other files.`,
             caption: args.caption,
             isImage,
             groupFolder,
+            broadcast: !!isScheduledTask,
             timestamp: new Date().toISOString()
           };
 

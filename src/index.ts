@@ -318,6 +318,16 @@ async function runAgent(group: RegisteredGroup, prompt: string, chatJid: string)
   }
 }
 
+/**
+ * Get all registered JIDs for a given group folder.
+ * Used to broadcast messages to all platforms (e.g., both Telegram and Feishu) for the same group.
+ */
+function getJidsForGroup(groupFolder: string): string[] {
+  return Object.entries(registeredGroups)
+    .filter(([, group]) => group.folder === groupFolder)
+    .map(([jid]) => jid);
+}
+
 async function sendMessage(chatId: string, text: string): Promise<void> {
   try {
     if (chatId.startsWith('fs:')) {
@@ -405,18 +415,26 @@ async function processGroupIpcMessages(groupFolder: string, isMain: boolean): Pr
 
         if (data.type === 'message' && data.chatJid && data.text) {
           if (isAuthorized) {
-            await sendMessage(data.chatJid, data.text);
-            sentToChats.push(data.chatJid);
-            logger.info({ chatJid: data.chatJid, groupFolder }, 'IPC message sent (inline)');
+            // If broadcast flag is set (scheduled tasks), send to all JIDs for this group
+            const targetJids = data.broadcast ? getJidsForGroup(groupFolder) : [data.chatJid];
+            for (const jid of targetJids) {
+              await sendMessage(jid, data.text);
+              sentToChats.push(jid);
+            }
+            logger.info({ chatJid: data.chatJid, groupFolder, broadcast: !!data.broadcast, targets: targetJids.length }, 'IPC message sent (inline)');
           } else {
             logger.warn({ chatJid: data.chatJid, groupFolder }, 'Unauthorized IPC message attempt blocked');
           }
         } else if (data.type === 'file' && data.chatJid && data.filePath) {
           if (isAuthorized) {
             const hostPath = containerPathToHostPath(data.filePath, groupFolder);
-            await sendFile(data.chatJid, hostPath, data.isImage, data.caption);
-            sentToChats.push(data.chatJid);
-            logger.info({ chatJid: data.chatJid, groupFolder, filePath: hostPath }, 'IPC file sent (inline)');
+            // If broadcast flag is set (scheduled tasks), send to all JIDs for this group
+            const targetJids = data.broadcast ? getJidsForGroup(groupFolder) : [data.chatJid];
+            for (const jid of targetJids) {
+              await sendFile(jid, hostPath, data.isImage, data.caption);
+              sentToChats.push(jid);
+            }
+            logger.info({ chatJid: data.chatJid, groupFolder, filePath: hostPath, broadcast: !!data.broadcast, targets: targetJids.length }, 'IPC file sent (inline)');
           } else {
             logger.warn({ chatJid: data.chatJid, groupFolder }, 'Unauthorized IPC file attempt blocked');
           }
@@ -474,16 +492,24 @@ function startIpcWatcher(): void {
 
               if (data.type === 'message' && data.chatJid && data.text) {
                 if (isAuthorized) {
-                  await sendMessage(data.chatJid, data.text);
-                  logger.info({ chatJid: data.chatJid, sourceGroup }, 'IPC message sent');
+                  // If broadcast flag is set (scheduled tasks), send to all JIDs for this group
+                  const targetJids = data.broadcast ? getJidsForGroup(sourceGroup) : [data.chatJid];
+                  for (const jid of targetJids) {
+                    await sendMessage(jid, data.text);
+                  }
+                  logger.info({ chatJid: data.chatJid, sourceGroup, broadcast: !!data.broadcast, targets: targetJids.length }, 'IPC message sent');
                 } else {
                   logger.warn({ chatJid: data.chatJid, sourceGroup }, 'Unauthorized IPC message attempt blocked');
                 }
               } else if (data.type === 'file' && data.chatJid && data.filePath) {
                 if (isAuthorized) {
                   const hostPath = containerPathToHostPath(data.filePath, sourceGroup);
-                  await sendFile(data.chatJid, hostPath, data.isImage, data.caption);
-                  logger.info({ chatJid: data.chatJid, sourceGroup, filePath: hostPath }, 'IPC file sent');
+                  // If broadcast flag is set (scheduled tasks), send to all JIDs for this group
+                  const targetJids = data.broadcast ? getJidsForGroup(sourceGroup) : [data.chatJid];
+                  for (const jid of targetJids) {
+                    await sendFile(jid, hostPath, data.isImage, data.caption);
+                  }
+                  logger.info({ chatJid: data.chatJid, sourceGroup, filePath: hostPath, broadcast: !!data.broadcast, targets: targetJids.length }, 'IPC file sent');
                 } else {
                   logger.warn({ chatJid: data.chatJid, sourceGroup }, 'Unauthorized IPC file attempt blocked');
                 }
