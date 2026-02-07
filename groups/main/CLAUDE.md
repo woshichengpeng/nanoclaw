@@ -35,12 +35,12 @@ After ANY file change that works: `git commit` FIRST, THEN reply to user. Never 
 **Workflow B - Code changes requiring restart (TypeScript, container code):**
 1. Make the change
 2. Test if possible (e.g., `npm run build`)
-3. If container code: `cd /workspace/project && ./container/build.sh`
-4. Request restart (NO commit yet)
+3. If container code: rebuild container (`cd /workspace/project && ./container/build.sh`)
+4. Request restart (do NOT commit yet, do NOT reply with conclusions like "done/fixed")
 5. Verify it works (ask user if needed)
-6. **COMMIT IMMEDIATELY** - before ANY reply to user
+6. **COMMIT** - only after verification passes
 7. Then reply with result
-8. If broken: 30-minute rollback will auto-revert
+8. If broken: don't commit; 30-minute rollback will auto-revert
 
 **Why this matters:** If you reply before committing, you WILL forget to commit. The 30-minute rollback will then destroy your work.
 
