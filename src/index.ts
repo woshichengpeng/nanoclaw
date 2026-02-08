@@ -56,10 +56,17 @@ function getContainerImageName(): string {
   return CONTAINER_IMAGE.split(':')[0];
 }
 
+// Extract tag from CONTAINER_IMAGE (e.g., "nanoclaw-agent:latest" -> "latest")
+function getContainerImageTag(): string {
+  const parts = CONTAINER_IMAGE.split(':');
+  return parts[1] || 'latest';
+}
+
 function backupCurrentImage(): boolean {
   try {
     const imageName = getContainerImageName();
-    execSync(`container image tag ${imageName}:latest ${imageName}:backup`, { stdio: 'pipe' });
+    const tag = getContainerImageTag();
+    execSync(`container image tag ${imageName}:${tag} ${imageName}:backup`, { stdio: 'pipe' });
     containerRebuildState = { hasBackup: true, lastBackupTime: new Date().toISOString() };
     saveContainerState();
     logger.info({ imageName }, 'Container image backed up to :backup tag');
@@ -89,8 +96,9 @@ function rollbackContainerImage(): boolean {
   }
   try {
     const imageName = getContainerImageName();
-    execSync(`container image tag ${imageName}:backup ${imageName}:latest`, { stdio: 'pipe' });
-    logger.info({ imageName }, 'Container image rolled back to :backup');
+    const tag = getContainerImageTag();
+    execSync(`container image tag ${imageName}:backup ${imageName}:${tag}`, { stdio: 'pipe' });
+    logger.info({ imageName, tag }, 'Container image rolled back to :backup');
     return true;
   } catch (err) {
     logger.error({ err }, 'Failed to rollback container image');
@@ -104,7 +112,7 @@ async function handleContainerRebuild(sourceGroup: string): Promise<void> {
   // Find the chat JID for the main group to send notifications
   const mainJid = Object.entries(registeredGroups).find(([, g]) => g.folder === MAIN_GROUP_FOLDER)?.[0];
 
-  // 1. Backup current :latest to :backup
+  // 1. Backup current image to :backup
   if (!backupCurrentImage()) {
     if (mainJid) {
       await sendMessage(mainJid, '❌ Container rebuild failed: Could not backup current image.');
