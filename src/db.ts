@@ -111,18 +111,6 @@ export function storeChatMetadata(chatJid: string, timestamp: string, name?: str
   }
 }
 
-/**
- * Update chat name without changing timestamp for existing chats.
- * New chats get the current time as their initial timestamp.
- * Used during group metadata sync.
- */
-export function updateChatName(chatJid: string, name: string): void {
-  db.prepare(`
-    INSERT INTO chats (jid, name, last_message_time) VALUES (?, ?, ?)
-    ON CONFLICT(jid) DO UPDATE SET name = excluded.name
-  `).run(chatJid, name, new Date().toISOString());
-}
-
 export interface ChatInfo {
   jid: string;
   name: string;
@@ -138,23 +126,6 @@ export function getAllChats(): ChatInfo[] {
     FROM chats
     ORDER BY last_message_time DESC
   `).all() as ChatInfo[];
-}
-
-/**
- * Get timestamp of last group metadata sync.
- */
-export function getLastGroupSync(): string | null {
-  // Store sync time in a special chat entry
-  const row = db.prepare(`SELECT last_message_time FROM chats WHERE jid = '__group_sync__'`).get() as { last_message_time: string } | undefined;
-  return row?.last_message_time || null;
-}
-
-/**
- * Record that group metadata was synced.
- */
-export function setLastGroupSync(): void {
-  const now = new Date().toISOString();
-  db.prepare(`INSERT OR REPLACE INTO chats (jid, name, last_message_time) VALUES ('__group_sync__', '__group_sync__', ?)`).run(now);
 }
 
 /**
@@ -197,28 +168,6 @@ export function storeMessageDirect(params: {
 }): void {
   db.prepare(`INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, media_path, reply_to_content) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
     .run(params.id, params.chatJid, params.sender, params.senderName, params.content, params.timestamp, params.isFromMe ? 1 : 0, params.mediaPath || null, params.replyToContent || null);
-}
-
-export function getNewMessages(jids: string[], lastTimestamp: string, botPrefix: string): { messages: NewMessage[]; newTimestamp: string } {
-  if (jids.length === 0) return { messages: [], newTimestamp: lastTimestamp };
-
-  const placeholders = jids.map(() => '?').join(',');
-  // Filter out bot's own messages by checking content prefix (not is_from_me, since user shares the account)
-  const sql = `
-    SELECT id, chat_jid, sender, sender_name, content, timestamp, media_path, reply_to_content
-    FROM messages
-    WHERE timestamp > ? AND chat_jid IN (${placeholders}) AND content NOT LIKE ?
-    ORDER BY timestamp
-  `;
-
-  const rows = db.prepare(sql).all(lastTimestamp, ...jids, `${botPrefix}:%`) as NewMessage[];
-
-  let newTimestamp = lastTimestamp;
-  for (const row of rows) {
-    if (row.timestamp > newTimestamp) newTimestamp = row.timestamp;
-  }
-
-  return { messages: rows, newTimestamp };
 }
 
 export function getMessagesSince(chatJid: string, sinceTimestamp: string, botPrefix: string): NewMessage[] {
@@ -274,10 +223,6 @@ export function getTaskById(id: string): ScheduledTask | undefined {
   return db.prepare('SELECT * FROM scheduled_tasks WHERE id = ?').get(id) as ScheduledTask | undefined;
 }
 
-export function getTasksForGroup(groupFolder: string): ScheduledTask[] {
-  return db.prepare('SELECT * FROM scheduled_tasks WHERE group_folder = ? ORDER BY created_at DESC').all(groupFolder) as ScheduledTask[];
-}
-
 export function getAllTasks(): ScheduledTask[] {
   return db.prepare('SELECT * FROM scheduled_tasks ORDER BY created_at DESC').all() as ScheduledTask[];
 }
@@ -327,16 +272,6 @@ export function logTaskRun(log: TaskRunLog): void {
     INSERT INTO task_run_logs (task_id, run_at, duration_ms, status, result, error)
     VALUES (?, ?, ?, ?, ?, ?)
   `).run(log.task_id, log.run_at, log.duration_ms, log.status, log.result, log.error);
-}
-
-export function getTaskRunLogs(taskId: string, limit = 10): TaskRunLog[] {
-  return db.prepare(`
-    SELECT task_id, run_at, duration_ms, status, result, error
-    FROM task_run_logs
-    WHERE task_id = ?
-    ORDER BY run_at DESC
-    LIMIT ?
-  `).all(taskId, limit) as TaskRunLog[];
 }
 
 /**
