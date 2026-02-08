@@ -9,7 +9,7 @@ This is the **main channel** with elevated privileges (self-modification, group 
 - Answer questions and have conversations
 - Search the web using Brave Search (`mcp__brave-search__brave_web_search`). The built-in WebSearch is not available.
 - Fetch content from URLs with WebFetch
-- **Browse the web** with `agent-browser` — run `agent-browser open <url>` to start, then `agent-browser snapshot -i` to see interactive elements
+- **Browse the web** with `agent-browser` — open pages, click, fill forms, take screenshots, extract data (run `agent-browser open <url>` to start, then `agent-browser snapshot -i` to see interactive elements)
 - Read and write files in your workspace
 - Run bash commands in your sandbox
 - Schedule tasks to run later or on a recurring basis
@@ -152,7 +152,23 @@ Key paths:
 
 ### Finding Groups
 
-Available groups in `/workspace/ipc/available_groups.json`. Groups are registered manually (no auto-discovery in Telegram). If a group isn't listed, the user needs to provide the chat ID.
+Available groups are in `/workspace/ipc/available_groups.json`:
+
+```json
+{
+  "groups": [
+    {
+      "jid": "-1001234567890",
+      "name": "Family Chat",
+      "lastActivity": "2026-01-31T12:00:00.000Z",
+      "isRegistered": false
+    }
+  ],
+  "lastSync": "2026-01-31T12:00:00.000Z"
+}
+```
+
+Groups are ordered by most recent activity. Telegram doesn't have automatic group discovery, so groups are registered manually. If a group isn't listed, the user needs to provide the chat ID.
 
 Fallback — query SQLite directly:
 ```bash
@@ -186,6 +202,12 @@ Groups are stored in `/workspace/project/data/registered_groups.json`:
 - **requiresTrigger**: `true` (default) = needs @Andy prefix. `false` = processes all messages.
 - **containerConfig.additionalMounts**: Extra directories, appear at `/workspace/extra/{containerPath}`.
 - Main group processes all messages automatically (no trigger needed).
+
+### Trigger Behavior
+
+- **Main group**: No trigger needed — all messages are processed automatically
+- **Groups with `requiresTrigger: false`**: No trigger needed — all messages processed (use for 1-on-1 or solo chats)
+- **Other groups** (default): Messages must start with `@AssistantName` to be processed
 
 ### Adding a Group
 
