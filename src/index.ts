@@ -1,5 +1,4 @@
 import 'dotenv/config';
-import { Telegraf, Input } from 'telegraf';
 import { execSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
@@ -20,13 +19,12 @@ import {
   setModelOverride
 } from './config.js';
 import { RegisteredGroup, Session, NewMessage } from './types.js';
-import { initDatabase, storeMessage, storeMessageDirect, storeChatMetadata, getMessagesSince, getMessagesSinceRowId, getMaxRowIdBefore, getAllTasks, getAllChats, migrateAddChannelPrefix } from './db.js';
+import { initDatabase, storeMessageDirect, storeChatMetadata, getMessagesSince, getMessagesSinceRowId, getMaxRowIdBefore, getAllTasks, getAllChats, migrateAddChannelPrefix } from './db.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { AgentResponse, runContainerAgent, writeTasksSnapshot, writeGroupsSnapshot, AvailableGroup } from './container-runner.js';
 import { loadJson, saveJson } from './utils.js';
 import { logger } from './logger.js';
-
-const telegrafBot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN!);
+import { setupTelegram, telegramSendMessage, telegramSendFile, telegramSetTyping } from './telegram.js';
 let lastTimestamp = '';
 let lastTimestampByChat: Record<string, string> = {};
 let lastRowIdByChat: Record<string, number> = {};
@@ -150,7 +148,7 @@ async function setTyping(chatId: string, isTyping: boolean): Promise<void> {
       return;
     }
     const tgId = chatId.startsWith('tg:') ? chatId.slice(3) : chatId;
-    await telegrafBot.telegram.sendChatAction(tgId, 'typing');
+    await telegramSetTyping(tgId);
   } catch (err) {
     logger.debug({ chatId, err }, 'Failed to update typing status');
   }
@@ -472,8 +470,7 @@ async function sendMessage(chatId: string, text: string): Promise<void> {
       const { feishuSendMessage } = await import('./feishu.js');
       await feishuSendMessage(chatId.slice(3), text);
     } else {
-      const tgId = chatId.startsWith('tg:') ? chatId.slice(3) : chatId;
-      await telegrafBot.telegram.sendMessage(tgId, text);
+      await telegramSendMessage(chatId.startsWith('tg:') ? chatId.slice(3) : chatId, text);
     }
     logger.info({ chatId, length: text.length }, 'Message sent');
   } catch (err) {
@@ -510,14 +507,7 @@ async function sendFile(
       const { feishuSendFile } = await import('./feishu.js');
       await feishuSendFile(chatId.slice(3), filePath, isImage, caption);
     } else {
-      const tgId = chatId.startsWith('tg:') ? chatId.slice(3) : chatId;
-      const inputFile = Input.fromLocalFile(filePath);
-
-      if (isImage) {
-        await telegrafBot.telegram.sendPhoto(tgId, inputFile, { caption });
-      } else {
-        await telegrafBot.telegram.sendDocument(tgId, inputFile, { caption });
-      }
+      await telegramSendFile(chatId.startsWith('tg:') ? chatId.slice(3) : chatId, filePath, isImage, caption);
     }
 
     logger.info({ chatId, filePath, isImage }, 'File sent');
@@ -870,135 +860,6 @@ async function processTaskIpc(
   }
 }
 
-async function downloadTelegramFile(fileId: string, groupFolder: string, fileName: string): Promise<string> {
-  const mediaDir = path.join(GROUPS_DIR, groupFolder, 'media');
-  fs.mkdirSync(mediaDir, { recursive: true });
-
-  const fileLink = await telegrafBot.telegram.getFileLink(fileId);
-  const response = await fetch(fileLink.href);
-  const buffer = Buffer.from(await response.arrayBuffer());
-
-  const filePath = path.join(mediaDir, fileName);
-  fs.writeFileSync(filePath, buffer);
-
-  return filePath;
-}
-
-function setupTelegram(): void {
-  // Handle incoming messages (including text, photos, documents)
-  telegrafBot.on('message', async (ctx) => {
-    const chatId = 'tg:' + String(ctx.chat.id);
-    const isGroup = ctx.chat.type === 'group' || ctx.chat.type === 'supergroup';
-    const senderId = String(ctx.from?.id || ctx.chat.id);
-    const senderName = ctx.from?.first_name || ctx.from?.username || 'User';
-    const timestamp = new Date(ctx.message.date * 1000).toISOString();
-
-    // Check if this chat is registered
-    const group = registeredGroups[chatId];
-    if (!group) {
-      logger.debug({ chatId }, 'Message from unregistered Telegram chat');
-      return;
-    }
-
-    let content = '';
-    let mediaPath: string | undefined;
-    let replyToContent: string | undefined;
-
-    // Check if this is a reply to another message - extract original content directly from Telegram
-    if ('reply_to_message' in ctx.message && ctx.message.reply_to_message) {
-      const replyMsg = ctx.message.reply_to_message;
-      const replySender = replyMsg.from?.first_name || replyMsg.from?.username || 'Unknown';
-      let replyText = '';
-
-      if ('text' in replyMsg) {
-        replyText = replyMsg.text;
-      } else if ('caption' in replyMsg && replyMsg.caption) {
-        replyText = replyMsg.caption;
-      } else if ('photo' in replyMsg) {
-        replyText = '[图片]';
-      } else if ('document' in replyMsg) {
-        replyText = '[文件]';
-      } else {
-        replyText = '[消息]';
-      }
-
-      // Limit to 100 chars for brevity
-      replyToContent = `${replySender}: ${replyText.substring(0, 100)}`;
-    }
-
-    // Handle different message types
-    if ('text' in ctx.message) {
-      content = ctx.message.text;
-    } else if ('photo' in ctx.message) {
-      // Get the largest photo (last in array)
-      const photo = ctx.message.photo[ctx.message.photo.length - 1];
-      const caption = ('caption' in ctx.message ? ctx.message.caption : '') || '';
-      const fileName = `${ctx.message.message_id}_${Date.now()}.jpg`;
-
-      try {
-        mediaPath = await downloadTelegramFile(photo.file_id, group.folder, fileName);
-        content = caption || '[图片]';
-        logger.info({ chatId, fileName, mediaPath }, 'Downloaded photo');
-      } catch (err) {
-        logger.error({ chatId, err }, 'Failed to download photo');
-        content = '[图片下载失败]';
-      }
-    } else if ('document' in ctx.message) {
-      const doc = ctx.message.document;
-      const caption = ('caption' in ctx.message ? ctx.message.caption : '') || '';
-      const fileName = `${ctx.message.message_id}_${doc.file_name || 'file'}`;
-
-      try {
-        mediaPath = await downloadTelegramFile(doc.file_id, group.folder, fileName);
-        content = caption || `[文件: ${doc.file_name || 'unknown'}]`;
-        logger.info({ chatId, fileName, mediaPath }, 'Downloaded document');
-      } catch (err) {
-        logger.error({ chatId, err }, 'Failed to download document');
-        content = `[文件下载失败: ${doc.file_name || 'unknown'}]`;
-      }
-    } else {
-      // Unsupported message type (sticker, voice, etc.)
-      logger.debug({ chatId, messageType: Object.keys(ctx.message) }, 'Unsupported message type');
-      return;
-    }
-
-    // Store message in database
-    storeChatMetadata(chatId, timestamp);
-    storeMessage({
-      key: { remoteJid: chatId, id: String(ctx.message.message_id), fromMe: false },
-      message: { conversation: content },
-      messageTimestamp: ctx.message.date,
-      pushName: senderName
-    }, chatId, false, senderName, mediaPath, replyToContent);
-
-    logger.info({ chatId, isGroup, senderName, hasMedia: !!mediaPath, replyTo: replyToContent }, `Telegram message: ${content.substring(0, 50)}...`);
-  });
-
-  // Start the bot
-  telegrafBot.launch();
-  logger.info('Telegram bot started');
-
-  // Graceful shutdown
-  process.once('SIGINT', () => {
-    logger.info('Shutting down Telegram bot');
-    telegrafBot.stop('SIGINT');
-  });
-  process.once('SIGTERM', () => {
-    logger.info('Shutting down Telegram bot');
-    telegrafBot.stop('SIGTERM');
-  });
-
-  // Start message processing loop
-  startSchedulerLoop({
-    sendMessage,
-    registeredGroups: () => registeredGroups,
-    getSessions: () => sessions,
-    processIpcMessages: processGroupIpcMessages
-  });
-  startIpcWatcher();
-  startMessageLoop();
-}
-
 async function startMessageLoop(): Promise<void> {
   logger.info(`NanoClaw running (trigger: @${ASSISTANT_NAME})`);
 
@@ -1160,7 +1021,13 @@ async function main(): Promise<void> {
   migrateAddChannelPrefix();
   logger.info('Database initialized');
   loadState();
-  setupTelegram();
+
+  // Initialize Telegram channel
+  setupTelegram({
+    storeMessageDirect,
+    storeChatMetadata,
+    getGroupFolder: (chatJid: string) => registeredGroups[chatJid]?.folder,
+  });
 
   // Optionally enable Feishu/Lark channel
   if (process.env.FEISHU_APP_ID && process.env.FEISHU_APP_SECRET) {
@@ -1172,6 +1039,16 @@ async function main(): Promise<void> {
     });
     logger.info('Feishu/Lark channel enabled');
   }
+
+  // Start core message processing (not channel-specific)
+  startSchedulerLoop({
+    sendMessage,
+    registeredGroups: () => registeredGroups,
+    getSessions: () => sessions,
+    processIpcMessages: processGroupIpcMessages
+  });
+  startIpcWatcher();
+  startMessageLoop();
 
   startRollbackMonitor();
 }
