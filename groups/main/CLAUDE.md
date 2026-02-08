@@ -85,6 +85,21 @@ When you learn something important:
 - Add recurring context directly to this CLAUDE.md
 - Always index new memory files at the top of CLAUDE.md
 
+## Obsidian Vault
+
+You have access to an Obsidian vault at `/workspace/extra/obsidian/`. This is a standard Obsidian vault — notes are plain Markdown files.
+
+**Operations:**
+- Search notes: use `Grep` for content search, `Glob` for finding files by name
+- Read/edit notes: use `Read`, `Write`, `Edit` tools directly on `.md` files
+- Create notes: use `Write` to create new `.md` files in the vault
+- List notes: use `Glob` with `*.md` pattern
+
+**Conventions:**
+- Don't touch `.obsidian/` (Obsidian's internal config)
+- Keep note names descriptive, use folders for organization
+- Use `[[wikilinks]]` for internal links between notes (Obsidian standard)
+
 ## Qwibit Ops Access
 
 You have access to Qwibit operations data at `/workspace/extra/qwibit-ops/` with these key areas:
@@ -135,6 +150,7 @@ Main has access to the entire project:
 |----------------|-----------|--------|
 | `/workspace/project` | Project root | read-write |
 | `/workspace/group` | `groups/main/` | read-write |
+| `/workspace/extra/obsidian` | `~/dev/Obsidian` | read-write |
 
 Key paths inside the container:
 - `/workspace/project/store/messages.db` - SQLite database
