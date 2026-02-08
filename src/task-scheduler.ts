@@ -2,7 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { CronExpressionParser } from 'cron-parser';
 import { getDueTasks, updateTaskAfterRun, logTaskRun, getTaskById, getAllTasks } from './db.js';
-import { ScheduledTask, RegisteredGroup } from './types.js';
+import { ScheduledTask, RegisteredGroup, AgentType, Session } from './types.js';
 import {
   ASSISTANT_NAME,
   GROUPS_DIR,
@@ -10,6 +10,7 @@ import {
   SCHEDULER_POLL_INTERVAL,
   DATA_DIR,
   TIMEZONE,
+  DEFAULT_AGENT,
 } from './config.js';
 import { runContainerAgent, writeTasksSnapshot } from './container-runner.js';
 import { logger } from './logger.js';
@@ -17,8 +18,22 @@ import { logger } from './logger.js';
 export interface SchedulerDependencies {
   sendMessage: (jid: string, text: string) => Promise<void>;
   registeredGroups: () => Record<string, RegisteredGroup>;
-  getSessions: () => Record<string, string>;
+  getSessions: () => Session;
   processIpcMessages: (groupFolder: string, isMain: boolean) => Promise<string[]>;
+}
+
+function normalizeAgent(agent?: string): AgentType {
+  if (agent === 'claude' || agent === 'codex') return agent;
+  return DEFAULT_AGENT === 'codex' ? 'codex' : 'claude';
+}
+
+function getSessionForAgent(sessions: Session, sessionKey: string, agent: AgentType): string | undefined {
+  const entry = sessions[sessionKey];
+  if (!entry) return undefined;
+  if (typeof entry === 'string') {
+    return agent === 'claude' ? entry : undefined;
+  }
+  return entry[agent];
 }
 
 async function runTask(task: ScheduledTask, deps: SchedulerDependencies): Promise<void> {
@@ -46,6 +61,7 @@ async function runTask(task: ScheduledTask, deps: SchedulerDependencies): Promis
 
   // Update tasks snapshot for container to read (filtered by group)
   const isMain = task.group_folder === MAIN_GROUP_FOLDER;
+  const agent = normalizeAgent(group.agent);
   const tasks = getAllTasks();
   writeTasksSnapshot(task.group_folder, isMain, tasks.map(t => ({
     id: t.id,
@@ -62,7 +78,9 @@ async function runTask(task: ScheduledTask, deps: SchedulerDependencies): Promis
 
   // For group context mode, use the chat's current session
   const sessions = deps.getSessions();
-  const sessionId = task.context_mode === 'group' ? sessions[task.chat_jid] : undefined;
+  const sessionId = task.context_mode === 'group'
+    ? getSessionForAgent(sessions, task.chat_jid, agent)
+    : undefined;
 
   try {
     const output = await runContainerAgent(group, {
@@ -71,7 +89,8 @@ async function runTask(task: ScheduledTask, deps: SchedulerDependencies): Promis
       groupFolder: task.group_folder,
       chatJid: task.chat_jid,
       isMain,
-      isScheduledTask: true
+      isScheduledTask: true,
+      agent
     });
 
     if (output.status === 'error') {

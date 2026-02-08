@@ -12,13 +12,15 @@ import {
   MAIN_GROUP_FOLDER,
   IPC_POLL_INTERVAL,
   TIMEZONE,
-  CONTAINER_IMAGE,
+  DEFAULT_AGENT,
+  CONTAINER_IMAGE_CLAUDE,
+  CONTAINER_IMAGE_CODEX,
   GROUPS_DIR,
   MODEL_ALIASES,
   getModelOverride,
   setModelOverride
 } from './config.js';
-import { RegisteredGroup, Session, NewMessage } from './types.js';
+import { RegisteredGroup, Session, NewMessage, AgentType } from './types.js';
 import { initDatabase, storeMessageDirect, storeChatMetadata, getMessagesSince, getMessagesSinceRowId, getMaxRowIdBefore, getAllTasks, getAllChats, migrateAddChannelPrefix } from './db.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { AgentResponse, runContainerAgent, writeTasksSnapshot, writeGroupsSnapshot, AvailableGroup } from './container-runner.js';
@@ -33,44 +35,85 @@ let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, string> = {};
 
 // === Container Rebuild State ===
-interface ContainerRebuildState {
+interface ImageBackupState {
   hasBackup: boolean;
   lastBackupTime?: string;
 }
 
-let containerRebuildState: ContainerRebuildState = { hasBackup: false };
+interface ContainerRebuildState {
+  claude: ImageBackupState;
+  codex: ImageBackupState;
+}
+
+function defaultContainerState(): ContainerRebuildState {
+  return {
+    claude: { hasBackup: false },
+    codex: { hasBackup: false }
+  };
+}
+
+let containerRebuildState: ContainerRebuildState = defaultContainerState();
 const CONTAINER_STATE_PATH = path.join(DATA_DIR, 'container_state.json');
 
 function loadContainerState(): void {
-  containerRebuildState = loadJson<ContainerRebuildState>(CONTAINER_STATE_PATH, { hasBackup: false });
+  const loaded = loadJson<unknown>(CONTAINER_STATE_PATH, defaultContainerState());
+  if (loaded && typeof loaded === 'object' && 'claude' in loaded && 'codex' in loaded) {
+    containerRebuildState = loaded as ContainerRebuildState;
+    return;
+  }
+
+  const legacy = loaded as { hasBackup?: boolean; lastBackupTime?: string };
+  containerRebuildState = {
+    claude: {
+      hasBackup: !!legacy?.hasBackup,
+      lastBackupTime: legacy?.lastBackupTime
+    },
+    codex: { hasBackup: false }
+  };
 }
 
 function saveContainerState(): void {
   saveJson(CONTAINER_STATE_PATH, containerRebuildState);
 }
 
-// Extract image name without tag from CONTAINER_IMAGE (e.g., "nanoclaw-agent:latest" -> "nanoclaw-agent")
-function getContainerImageName(): string {
-  return CONTAINER_IMAGE.split(':')[0];
+// Extract image name without tag (e.g., "nanoclaw-agent:latest" -> "nanoclaw-agent")
+function getContainerImageName(image: string): string {
+  return image.split(':')[0];
 }
 
-// Extract tag from CONTAINER_IMAGE (e.g., "nanoclaw-agent:latest" -> "latest")
-function getContainerImageTag(): string {
-  const parts = CONTAINER_IMAGE.split(':');
+// Extract tag (e.g., "nanoclaw-agent:latest" -> "latest")
+function getContainerImageTag(image: string): string {
+  const parts = image.split(':');
   return parts[1] || 'latest';
 }
 
-function backupCurrentImage(): boolean {
+function imageExists(image: string): boolean {
   try {
-    const imageName = getContainerImageName();
-    const tag = getContainerImageTag();
+    execSync(`container image inspect ${image}`, { stdio: 'pipe' });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function backupImage(image: string, key: keyof ContainerRebuildState): boolean {
+  if (!imageExists(image)) {
+    containerRebuildState[key] = { hasBackup: false };
+    saveContainerState();
+    logger.warn({ image }, 'Container image not found, skipping backup');
+    return true;
+  }
+
+  try {
+    const imageName = getContainerImageName(image);
+    const tag = getContainerImageTag(image);
     execSync(`container image tag ${imageName}:${tag} ${imageName}:backup`, { stdio: 'pipe' });
-    containerRebuildState = { hasBackup: true, lastBackupTime: new Date().toISOString() };
+    containerRebuildState[key] = { hasBackup: true, lastBackupTime: new Date().toISOString() };
     saveContainerState();
     logger.info({ imageName }, 'Container image backed up to :backup tag');
     return true;
   } catch (err) {
-    logger.error({ err }, 'Failed to backup container image');
+    logger.error({ err, image }, 'Failed to backup container image');
     return false;
   }
 }
@@ -87,19 +130,19 @@ function buildNewImage(): boolean {
   }
 }
 
-function rollbackContainerImage(): boolean {
-  if (!containerRebuildState.hasBackup) {
-    logger.warn('No backup image available for rollback');
+function rollbackContainerImage(image: string, key: keyof ContainerRebuildState): boolean {
+  if (!containerRebuildState[key]?.hasBackup) {
+    logger.warn({ image }, 'No backup image available for rollback');
     return false;
   }
   try {
-    const imageName = getContainerImageName();
-    const tag = getContainerImageTag();
+    const imageName = getContainerImageName(image);
+    const tag = getContainerImageTag(image);
     execSync(`container image tag ${imageName}:backup ${imageName}:${tag}`, { stdio: 'pipe' });
     logger.info({ imageName, tag }, 'Container image rolled back to :backup');
     return true;
   } catch (err) {
-    logger.error({ err }, 'Failed to rollback container image');
+    logger.error({ err, image }, 'Failed to rollback container image');
     return false;
   }
 }
@@ -110,18 +153,21 @@ async function handleContainerRebuild(sourceGroup: string): Promise<void> {
   // Find the chat JID for the main group to send notifications
   const mainJid = Object.entries(registeredGroups).find(([, g]) => g.folder === MAIN_GROUP_FOLDER)?.[0];
 
-  // 1. Backup current image to :backup
-  if (!backupCurrentImage()) {
+  // 1. Backup current images to :backup
+  const backupClaude = backupImage(CONTAINER_IMAGE_CLAUDE, 'claude');
+  const backupCodex = backupImage(CONTAINER_IMAGE_CODEX, 'codex');
+  if (!backupClaude || !backupCodex) {
     if (mainJid) {
-      await sendMessage(mainJid, '❌ Container rebuild failed: Could not backup current image.');
+      await sendMessage(mainJid, '❌ Container rebuild failed: Could not backup current images.');
     }
     return;
   }
 
   // 2. Build new image
   if (!buildNewImage()) {
-    logger.warn('Build failed, rolling back to backup image...');
-    rollbackContainerImage();
+    logger.warn('Build failed, rolling back to backup images...');
+    rollbackContainerImage(CONTAINER_IMAGE_CLAUDE, 'claude');
+    rollbackContainerImage(CONTAINER_IMAGE_CODEX, 'codex');
     if (mainJid) {
       await sendMessage(mainJid, '❌ Container rebuild failed: Build error. Rolled back to previous image.');
     }
@@ -184,6 +230,35 @@ function saveState(): void {
 
 type Channel = 'telegram' | 'feishu';
 
+function normalizeAgent(agent?: string): AgentType {
+  if (agent === 'claude' || agent === 'codex') return agent;
+  return DEFAULT_AGENT === 'codex' ? 'codex' : 'claude';
+}
+
+function getGroupAgent(group: RegisteredGroup): AgentType {
+  return normalizeAgent(group.agent);
+}
+
+function getSessionForAgent(sessionKey: string, agent: AgentType): string | undefined {
+  const entry = sessions[sessionKey];
+  if (!entry) return undefined;
+  if (typeof entry === 'string') {
+    return agent === 'claude' ? entry : undefined;
+  }
+  return entry[agent];
+}
+
+function setSessionForAgent(sessionKey: string, agent: AgentType, sessionId: string): void {
+  const entry = sessions[sessionKey];
+  if (typeof entry === 'string') {
+    sessions[sessionKey] = agent === 'claude'
+      ? { claude: sessionId }
+      : { claude: entry, codex: sessionId };
+  } else {
+    sessions[sessionKey] = { ...(entry || {}), [agent]: sessionId };
+  }
+}
+
 function getChannelFromJid(jid: string): Channel | null {
   if (jid.startsWith('tg:')) return 'telegram';
   if (jid.startsWith('fs:')) return 'feishu';
@@ -197,7 +272,7 @@ function normalizeChatJid(jid: string): { jid: string; channel: Channel | null }
   return { jid: `tg:${trimmed}`, channel: 'telegram' };
 }
 function registerGroup(jid: string, group: RegisteredGroup): void {
-  registeredGroups[jid] = group;
+  registeredGroups[jid] = { ...group, agent: normalizeAgent(group.agent) };
   saveJson(path.join(DATA_DIR, 'registered_groups.json'), registeredGroups);
 
   // Create group folder
@@ -273,6 +348,8 @@ async function processMessage(msg: NewMessage): Promise<void> {
       '📋 Available commands:',
       '',
       '/help - Show this help',
+      '/agent - Show current agent',
+      '/agent <claude|codex> - Switch agent for this group',
       '/model - Show current model',
       '/model <name> - Switch model (opus, sonnet, haiku, or full ID)',
       '/model default - Reset to default model',
@@ -280,6 +357,34 @@ async function processMessage(msg: NewMessage): Promise<void> {
       '',
       `Current model: ${currentModel}`,
     ].join('\n'));
+    return;
+  }
+
+  // Handle /agent command - switch agent for this group
+  const agentMatch = content.match(/^\/agent(?:\s+(.+))?$/i);
+  if (agentMatch) {
+    const agentArg = agentMatch[1]?.trim().toLowerCase();
+    if (!agentArg) {
+      const current = getGroupAgent(group);
+      await sendMessage(msg.chat_jid, `Current agent: ${current}`);
+      return;
+    }
+    if (agentArg !== 'claude' && agentArg !== 'codex') {
+      await sendMessage(msg.chat_jid, 'Usage: /agent <claude|codex>');
+      return;
+    }
+
+    for (const regGroup of Object.values(registeredGroups)) {
+      if (regGroup.folder === group.folder) {
+        regGroup.agent = agentArg as AgentType;
+      }
+    }
+    saveJson(path.join(DATA_DIR, 'registered_groups.json'), registeredGroups);
+
+    await sendMessage(msg.chat_jid, `✅ Agent set to: ${agentArg}`);
+    if (agentArg === 'codex' && !process.env.CODEX_API_KEY && !process.env.OPENAI_API_KEY) {
+      await sendMessage(msg.chat_jid, '⚠️ Codex requires CODEX_API_KEY or OPENAI_API_KEY in .env.');
+    }
     return;
   }
 
@@ -408,9 +513,10 @@ async function processMessage(msg: NewMessage): Promise<void> {
 
 async function runAgent(group: RegisteredGroup, prompt: string, chatJid: string): Promise<AgentResponse | 'error'> {
   const isMain = group.folder === MAIN_GROUP_FOLDER;
+  const agent = getGroupAgent(group);
   // Use chat_jid as session key so each platform gets its own session context
   const sessionKey = chatJid;
-  const sessionId = sessions[sessionKey];
+  const sessionId = getSessionForAgent(sessionKey, agent);
 
   // Update tasks snapshot for container to read (filtered by group)
   const tasks = getAllTasks();
@@ -434,11 +540,12 @@ async function runAgent(group: RegisteredGroup, prompt: string, chatJid: string)
       sessionId,
       groupFolder: group.folder,
       chatJid,
-      isMain
+      isMain,
+      agent
     });
 
     if (output.newSessionId) {
-      sessions[sessionKey] = output.newSessionId;
+      setSessionForAgent(sessionKey, agent, output.newSessionId);
       saveJson(path.join(DATA_DIR, 'sessions.json'), sessions);
     }
 
@@ -932,13 +1039,19 @@ function rollbackChanges(): void {
     execSync('git checkout .', { cwd: process.cwd(), stdio: 'pipe' });
     execSync('git clean -fd', { cwd: process.cwd(), stdio: 'pipe' });
 
-    // Also rollback container image if we have a backup
-    if (containerRebuildState.hasBackup) {
-      logger.warn('Rolling back container image to :backup...');
-      if (rollbackContainerImage()) {
-        containerRebuildState = { hasBackup: false };
-        saveContainerState();
+    // Also rollback container images if we have backups
+    const hasClaudeBackup = containerRebuildState.claude?.hasBackup;
+    const hasCodexBackup = containerRebuildState.codex?.hasBackup;
+    if (hasClaudeBackup || hasCodexBackup) {
+      logger.warn('Rolling back container images to :backup...');
+      if (hasClaudeBackup) {
+        rollbackContainerImage(CONTAINER_IMAGE_CLAUDE, 'claude');
       }
+      if (hasCodexBackup) {
+        rollbackContainerImage(CONTAINER_IMAGE_CODEX, 'codex');
+      }
+      containerRebuildState = defaultContainerState();
+      saveContainerState();
     }
 
     logger.info('Code and container changes rolled back successfully');

@@ -8,7 +8,9 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import {
-  CONTAINER_IMAGE,
+  CONTAINER_IMAGE_CLAUDE,
+  CONTAINER_IMAGE_CODEX,
+  DEFAULT_AGENT,
   CONTAINER_TIMEOUT,
   CONTAINER_MAX_OUTPUT_SIZE,
   GROUPS_DIR,
@@ -38,6 +40,7 @@ export interface ContainerInput {
   chatJid: string;
   isMain: boolean;
   isScheduledTask?: boolean;
+  agent?: 'claude' | 'codex';
 }
 
 export interface AgentResponse {
@@ -59,7 +62,12 @@ interface VolumeMount {
   readonly?: boolean;
 }
 
-function buildVolumeMounts(group: RegisteredGroup, isMain: boolean, chatJid?: string): VolumeMount[] {
+function buildVolumeMounts(
+  group: RegisteredGroup,
+  isMain: boolean,
+  agent: 'claude' | 'codex',
+  chatJid?: string
+): VolumeMount[] {
   const mounts: VolumeMount[] = [];
   const homeDir = getHomeDir();
   const projectRoot = process.cwd();
@@ -101,11 +109,13 @@ function buildVolumeMounts(group: RegisteredGroup, isMain: boolean, chatJid?: st
   // Per-chatJid Claude sessions directory (isolated from other groups AND platforms)
   // Each chat_jid gets their own .claude/ to prevent cross-platform session context leaking
   const sanitizedJid = (chatJid || group.folder).replace(/[^a-zA-Z0-9_-]/g, '_');
-  const groupSessionsDir = path.join(DATA_DIR, 'sessions', group.folder, sanitizedJid, '.claude');
+  const sessionDirName = agent === 'codex' ? '.codex' : '.claude';
+  const sessionContainerPath = agent === 'codex' ? '/home/node/.codex' : '/home/node/.claude';
+  const groupSessionsDir = path.join(DATA_DIR, 'sessions', group.folder, sanitizedJid, sessionDirName);
   fs.mkdirSync(groupSessionsDir, { recursive: true });
   mounts.push({
     hostPath: groupSessionsDir,
-    containerPath: '/home/node/.claude',
+    containerPath: sessionContainerPath,
     readonly: false
   });
 
@@ -136,6 +146,12 @@ function buildVolumeMounts(group: RegisteredGroup, isMain: boolean, chatJid?: st
       'ANTHROPIC_DEFAULT_HAIKU_MODEL',
       'ANTHROPIC_DEFAULT_OPUS_MODEL',
       'ANTHROPIC_DEFAULT_SONNET_MODEL',
+      'CODEX_API_KEY',
+      'CODEX_MODEL',
+      'OPENAI_API_KEY',
+      'OPENAI_BASE_URL',
+      'OPENAI_ORG_ID',
+      'OPENAI_PROJECT',
       'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC',
       'DISABLE_NON_ESSENTIAL_MODEL_CALLS',
       'BRAVE_API_KEY'
@@ -149,9 +165,18 @@ function buildVolumeMounts(group: RegisteredGroup, isMain: boolean, chatJid?: st
       });
 
     if (filteredLines.length > 0) {
-      // Apply model override if set via /model command
+      const hasCodexKey = filteredLines.some(l => l.trimStart().startsWith('CODEX_API_KEY='));
+      const openaiKeyLine = filteredLines.find(l => l.trimStart().startsWith('OPENAI_API_KEY='));
+      if (!hasCodexKey && openaiKeyLine) {
+        const openaiKey = openaiKeyLine.split('=').slice(1).join('=');
+        if (openaiKey) {
+          filteredLines.push(`CODEX_API_KEY=${openaiKey}`);
+        }
+      }
+
+      // Apply model override if set via /model command (Claude only)
       const modelOverride = getModelOverride();
-      if (modelOverride) {
+      if (modelOverride && agent === 'claude') {
         const idx = filteredLines.findIndex(l => l.trimStart().startsWith('ANTHROPIC_MODEL='));
         if (idx !== -1) {
           filteredLines[idx] = `ANTHROPIC_MODEL=${modelOverride}`;
@@ -182,7 +207,11 @@ function buildVolumeMounts(group: RegisteredGroup, isMain: boolean, chatJid?: st
   return mounts;
 }
 
-function buildContainerArgs(mounts: VolumeMount[], containerName: string): string[] {
+function buildContainerArgs(
+  mounts: VolumeMount[],
+  containerName: string,
+  containerImage: string
+): string[] {
   const args: string[] = ['run', '-i', '--rm', '--name', containerName];
 
   // Apple Container: --mount for readonly, -v for read-write
@@ -194,7 +223,7 @@ function buildContainerArgs(mounts: VolumeMount[], containerName: string): strin
     }
   }
 
-  args.push(CONTAINER_IMAGE);
+  args.push(containerImage);
 
   return args;
 }
@@ -208,10 +237,14 @@ export async function runContainerAgent(
   const groupDir = path.join(GROUPS_DIR, group.folder);
   fs.mkdirSync(groupDir, { recursive: true });
 
-  const mounts = buildVolumeMounts(group, input.isMain, input.chatJid);
+  const agent = input.agent === 'codex' || input.agent === 'claude'
+    ? input.agent
+    : (DEFAULT_AGENT === 'codex' ? 'codex' : 'claude');
+  const mounts = buildVolumeMounts(group, input.isMain, agent, input.chatJid);
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-${safeName}-${Date.now()}`;
-  const containerArgs = buildContainerArgs(mounts, containerName);
+  const containerImage = agent === 'codex' ? CONTAINER_IMAGE_CODEX : CONTAINER_IMAGE_CLAUDE;
+  const containerArgs = buildContainerArgs(mounts, containerName, containerImage);
 
   logger.debug({
     group: group.name,
@@ -224,7 +257,8 @@ export async function runContainerAgent(
     group: group.name,
     containerName,
     mountCount: mounts.length,
-    isMain: input.isMain
+    isMain: input.isMain,
+    agent
   }, 'Spawning container agent');
 
   const logsDir = path.join(GROUPS_DIR, group.folder, 'logs');

@@ -71,6 +71,7 @@ A personal Claude assistant accessible via WhatsApp, with minimal custom code.
 
 **Core components:**
 - **Claude Agent SDK** as the core agent
+- **Codex CLI (optional)** as an alternative agent backend
 - **Apple Container** for isolated agent execution (Linux VMs)
 - **WhatsApp** as the primary I/O channel
 - **Persistent memory** per conversation and globally
@@ -100,7 +101,7 @@ A personal Claude assistant accessible via WhatsApp, with minimal custom code.
 - Agent runs in the group's folder, automatically inherits both CLAUDE.md files
 
 ### Session Management
-- Each group maintains a conversation session (via Claude Agent SDK)
+- Each group maintains a conversation session per agent backend
 - Sessions auto-compact when context gets too long, preserving critical information
 
 ### Container Isolation

@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  Personal Claude assistant over Telegram, running securely in containers. Fork of <a href="https://github.com/gavrielc/nanoclaw">gavrielc/nanoclaw</a>.
+  Personal Claude (or Codex) assistant over Telegram, running securely in containers. Fork of <a href="https://github.com/gavrielc/nanoclaw">gavrielc/nanoclaw</a>.
 </p>
 
 ## What This Fork Changes
@@ -33,6 +33,7 @@ Then run `/setup`.
 - **Isolated group context** - Each group has its own `CLAUDE.md` memory, isolated filesystem, and container sandbox
 - **Main channel** - Your private chat for admin control; every other group is isolated
 - **Scheduled tasks** - Recurring cron jobs that run Claude and message you back
+- **Optional Codex backend** - Switch per group with `/agent codex`
 - **Web access** - Brave Search and web fetch
 - **Container isolation** - Agents sandboxed in Apple Container (macOS) or Docker
 - **Optional integrations** - Gmail (`/add-gmail`), X/Twitter (`/x-integration`), voice transcription, and more via skills
@@ -53,10 +54,16 @@ From the main channel, manage groups and tasks:
 @Andy pause the Monday briefing task
 ```
 
+Switch agent per group:
+```
+/agent codex
+/agent claude
+```
+
 ## Architecture
 
 ```
-Telegram (Telegraf) --> SQLite --> Polling loop --> Container (Claude Agent SDK) --> Response
+Telegram (Telegraf) --> SQLite --> Polling loop --> Container (Claude Agent SDK / Codex CLI) --> Response
 ```
 
 Single Node.js process. Agents execute in isolated Linux containers with mounted directories. IPC via filesystem.

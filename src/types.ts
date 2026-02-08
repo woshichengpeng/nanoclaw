@@ -41,10 +41,13 @@ export interface RegisteredGroup {
   channel?: 'telegram' | 'feishu';
   requiresTrigger?: boolean; // Default: true for groups, false for solo chats
   containerConfig?: ContainerConfig;
+  agent?: AgentType;
 }
 
+export type SessionEntry = string | { claude?: string; codex?: string };
+
 export interface Session {
-  [folder: string]: string;
+  [folder: string]: SessionEntry;
 }
 
 export interface NewMessage {
@@ -82,3 +85,4 @@ export interface TaskRunLog {
   result: string | null;
   error: string | null;
 }
+export type AgentType = 'claude' | 'codex';
