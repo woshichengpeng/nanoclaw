@@ -53,23 +53,6 @@ export interface ContainerOutput {
   error?: string;
 }
 
-/**
- * Normalize container result to AgentResponse.
- * Handles both old format (plain string) and new format (AgentResponse object).
- */
-export function normalizeAgentResult(raw: unknown): AgentResponse | null {
-  if (raw === null || raw === undefined) return null;
-  if (typeof raw === 'string') {
-    // Old container format: plain string result
-    return raw ? { outputType: 'message', userMessage: raw } : null;
-  }
-  if (typeof raw === 'object' && 'outputType' in (raw as Record<string, unknown>)) {
-    return raw as AgentResponse;
-  }
-  // Unknown format — treat as log
-  return { outputType: 'log', internalLog: JSON.stringify(raw) };
-}
-
 interface VolumeMount {
   hostPath: string;
   containerPath: string;
@@ -414,12 +397,7 @@ export async function runContainerAgent(
           jsonLine = lines[lines.length - 1];
         }
 
-        const rawOutput = JSON.parse(jsonLine);
-        // Normalize result to AgentResponse (handles old string format and new object format)
-        const output: ContainerOutput = {
-          ...rawOutput,
-          result: normalizeAgentResult(rawOutput.result),
-        };
+        const output: ContainerOutput = JSON.parse(jsonLine);
 
         logger.info({
           group: group.name,
