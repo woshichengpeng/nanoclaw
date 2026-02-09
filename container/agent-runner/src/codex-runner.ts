@@ -206,8 +206,7 @@ async function runCodex(prompt: string, sessionId?: string): Promise<{
       '--json',
       '--output-schema', SCHEMA_PATH,
       '-o', OUTPUT_PATH,
-      '--full-auto',
-      '--sandbox', 'danger-full-access',
+      '--dangerously-bypass-approvals-and-sandbox',
       '--skip-git-repo-check',
       prompt
     );
