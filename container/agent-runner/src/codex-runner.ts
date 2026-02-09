@@ -174,20 +174,28 @@ async function runCodex(prompt: string, sessionId?: string): Promise<{
 }> {
   const args: string[] = [];
   if (sessionId) {
-    args.push('exec', 'resume', sessionId);
+    // Resume mode has a restricted flag set; avoid output-schema here.
+    args.push(
+      'exec',
+      'resume',
+      '--json',
+      '--skip-git-repo-check',
+      '--dangerously-bypass-approvals-and-sandbox',
+      sessionId,
+      prompt
+    );
   } else {
-    args.push('exec');
+    args.push(
+      'exec',
+      '--json',
+      '--output-schema', SCHEMA_PATH,
+      '-o', OUTPUT_PATH,
+      '--full-auto',
+      '--sandbox', 'danger-full-access',
+      '--skip-git-repo-check',
+      prompt
+    );
   }
-
-  args.push(
-    '--json',
-    '--output-schema', SCHEMA_PATH,
-    '-o', OUTPUT_PATH,
-    '--full-auto',
-    '--sandbox', 'danger-full-access',
-    '--skip-git-repo-check',
-    prompt
-  );
 
   let stdoutBuffer = '';
   let stderrBuffer = '';
