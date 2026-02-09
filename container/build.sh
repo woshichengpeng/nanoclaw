@@ -20,6 +20,11 @@ if [[ -n "${1:-}" ]]; then
   TAG="$1"
 fi
 
+# Compile agent-runner TypeScript so dist/ is fresh before Docker COPY
+echo "Compiling agent-runner TypeScript..."
+(cd "$SCRIPT_DIR/agent-runner" && npm run build)
+echo ""
+
 build_image() {
   local name="$1"
   local dockerfile="$2"
