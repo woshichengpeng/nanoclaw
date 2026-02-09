@@ -128,6 +128,7 @@ function writeCodexConfig(): void {
   fs.mkdirSync(configDir, { recursive: true });
 
   const lines: string[] = [
+    'web_search = "disabled"',
     '[mcp_servers.nanoclaw]',
     'command = "node"',
     'args = ["/app/dist/ipc-mcp-stdio.js"]',
