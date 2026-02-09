@@ -17,7 +17,9 @@ import {
   CONTAINER_IMAGE_CODEX,
   GROUPS_DIR,
   MODEL_ALIASES,
+  getCodexReasoningEffort,
   getModelOverride,
+  setCodexReasoningEffort,
   setModelOverride
 } from './config.js';
 import { RegisteredGroup, Session, NewMessage, AgentType } from './types.js';
@@ -239,6 +241,15 @@ function getGroupAgent(group: RegisteredGroup): AgentType {
   return normalizeAgent(group.agent);
 }
 
+function getEnvDefaultModel(agent: AgentType): string | undefined {
+  if (agent === 'claude') return process.env.ANTHROPIC_MODEL;
+  return process.env.CODEX_MODEL;
+}
+
+function getCurrentModel(agent: AgentType): string {
+  return getModelOverride(agent) || getEnvDefaultModel(agent) || '(default)';
+}
+
 function getSessionForAgent(sessionKey: string, agent: AgentType): string | undefined {
   const entry = sessions[sessionKey];
   if (!entry) return undefined;
@@ -343,7 +354,11 @@ async function processMessage(msg: NewMessage): Promise<void> {
 
   // Handle /help command - show available commands
   if (content === '/help' || content.endsWith('/help')) {
-    const currentModel = getModelOverride() || process.env.ANTHROPIC_MODEL || '(default)';
+    const currentAgent = getGroupAgent(group);
+    const currentModel = getCurrentModel(currentAgent);
+    const currentEffort = currentAgent === 'codex'
+      ? (getCodexReasoningEffort() || '(default)')
+      : null;
     await sendMessage(msg.chat_jid, [
       '📋 Available commands:',
       '',
@@ -351,11 +366,16 @@ async function processMessage(msg: NewMessage): Promise<void> {
       '/agent - Show current agent',
       '/agent <claude|codex> - Switch agent for this group',
       '/model - Show current model',
-      '/model <name> - Switch model (opus, sonnet, haiku, or full ID)',
+      '/model <name> - Switch model for current agent (or full ID)',
       '/model default - Reset to default model',
+      '/effort - Show current reasoning effort (codex only)',
+      '/effort <level> - Set reasoning effort (none|minimal|low|medium|high|xhigh)',
+      '/effort default - Reset reasoning effort (codex only)',
       '/newsession - Clear session, start fresh',
       '',
+      `Current agent: ${currentAgent}`,
       `Current model: ${currentModel}`,
+      ...(currentEffort ? [`Current effort: ${currentEffort}`] : []),
     ].join('\n'));
     return;
   }
@@ -388,59 +408,118 @@ async function processMessage(msg: NewMessage): Promise<void> {
     return;
   }
 
-  // Handle /model command - switch Claude model
+  // Handle /model command - switch model for current agent
   const modelMatch = content.match(/^\/model(?:\s+(.+))?$/i);
   if (modelMatch) {
     const modelArg = modelMatch[1]?.trim();
     if (!modelArg) {
-      const current = getModelOverride() || process.env.ANTHROPIC_MODEL || '(default)';
-      const aliases = Object.entries(MODEL_ALIASES).map(([k, v]) => `  ${k} → ${v}`).join('\n');
-      await sendMessage(msg.chat_jid, `Current model: ${current}\n\nAliases:\n${aliases}\n\nUsage: /model <name|full-model-id>\nReset: /model default`);
+      const currentAgent = getGroupAgent(group);
+      const current = getCurrentModel(currentAgent);
+      const otherAgent: AgentType = currentAgent === 'claude' ? 'codex' : 'claude';
+      const otherModel = getCurrentModel(otherAgent);
+      const lines = [
+        `Current agent: ${currentAgent}`,
+        `Current model: ${current}`,
+        `Other agent model: ${otherModel}`,
+        '',
+        'Usage: /model <name|full-model-id>',
+        'Reset: /model default',
+      ];
+      if (currentAgent === 'claude') {
+        const aliases = Object.entries(MODEL_ALIASES).map(([k, v]) => `  ${k} → ${v}`).join('\n');
+        lines.splice(3, 0, 'Aliases:', aliases, '');
+      }
+      await sendMessage(msg.chat_jid, lines.join('\n'));
       return;
     }
     if (modelArg.toLowerCase() === 'default' || modelArg.toLowerCase() === 'reset') {
-      setModelOverride(null);
-      const defaultModel = process.env.ANTHROPIC_MODEL || '(env default)';
-      logger.info({ chatJid: msg.chat_jid }, 'Model override cleared');
-      await sendMessage(msg.chat_jid, `✅ Model reset to default: ${defaultModel}`);
+      const currentAgent = getGroupAgent(group);
+      setModelOverride(currentAgent, null);
+      const defaultModel = getEnvDefaultModel(currentAgent) || '(env default)';
+      logger.info({ chatJid: msg.chat_jid, agent: currentAgent }, 'Model override cleared');
+      await sendMessage(msg.chat_jid, `✅ Model reset for ${currentAgent}: ${defaultModel}`);
       return;
     }
-    const resolved = MODEL_ALIASES[modelArg.toLowerCase()] || modelArg;
+    const currentAgent = getGroupAgent(group);
+    const resolved = currentAgent === 'claude'
+      ? (MODEL_ALIASES[modelArg.toLowerCase()] || modelArg)
+      : modelArg;
 
-    // Validate model by making a minimal API call before saving
-    await sendMessage(msg.chat_jid, `🔄 Testing model: ${resolved}...`);
-    const baseUrl = (process.env.ANTHROPIC_BASE_URL || 'https://api.anthropic.com').replace(/\/+$/, '');
-    const apiKey = process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN || '';
-    try {
-      const resp = await fetch(`${baseUrl}/v1/messages`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': apiKey,
-          'anthropic-version': '2023-06-01',
-        },
-        body: JSON.stringify({
-          model: resolved,
-          max_tokens: 1,
-          messages: [{ role: 'user', content: 'hi' }],
-        }),
-        signal: AbortSignal.timeout(15000),
-      });
-      if (!resp.ok) {
-        const body = await resp.text().catch(() => '');
-        logger.warn({ model: resolved, status: resp.status, body }, 'Model validation failed');
-        await sendMessage(msg.chat_jid, `❌ Model unavailable: ${resolved}\nHTTP ${resp.status}: ${body.slice(0, 200)}`);
+    if (currentAgent === 'claude') {
+      // Validate model by making a minimal API call before saving
+      await sendMessage(msg.chat_jid, `🔄 Testing model: ${resolved}...`);
+      const baseUrl = (process.env.ANTHROPIC_BASE_URL || 'https://api.anthropic.com').replace(/\/+$/, '');
+      const apiKey = process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN || '';
+      try {
+        const resp = await fetch(`${baseUrl}/v1/messages`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-api-key': apiKey,
+            'anthropic-version': '2023-06-01',
+          },
+          body: JSON.stringify({
+            model: resolved,
+            max_tokens: 1,
+            messages: [{ role: 'user', content: 'hi' }],
+          }),
+          signal: AbortSignal.timeout(15000),
+        });
+        if (!resp.ok) {
+          const body = await resp.text().catch(() => '');
+          logger.warn({ model: resolved, status: resp.status, body }, 'Model validation failed');
+          await sendMessage(msg.chat_jid, `❌ Model unavailable: ${resolved}\nHTTP ${resp.status}: ${body.slice(0, 200)}`);
+          return;
+        }
+      } catch (err) {
+        logger.warn({ model: resolved, err }, 'Model validation request failed');
+        await sendMessage(msg.chat_jid, `❌ Cannot reach model: ${resolved}\n${err instanceof Error ? err.message : String(err)}`);
         return;
       }
-    } catch (err) {
-      logger.warn({ model: resolved, err }, 'Model validation request failed');
-      await sendMessage(msg.chat_jid, `❌ Cannot reach model: ${resolved}\n${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    setModelOverride(currentAgent, resolved);
+    logger.info({ chatJid: msg.chat_jid, agent: currentAgent, model: resolved }, 'Model override set');
+    await sendMessage(msg.chat_jid, `✅ Model switched for ${currentAgent}: ${resolved}`);
+    return;
+  }
+
+  // Handle /effort command - switch Codex reasoning effort
+  const effortMatch = content.match(/^\/effort(?:\s+(.+))?$/i);
+  if (effortMatch) {
+    const currentAgent = getGroupAgent(group);
+    if (currentAgent !== 'codex') {
+      await sendMessage(msg.chat_jid, '⚠️ /effort only applies to Codex. Switch with /agent codex first.');
       return;
     }
 
-    setModelOverride(resolved);
-    logger.info({ chatJid: msg.chat_jid, model: resolved }, 'Model override set');
-    await sendMessage(msg.chat_jid, `✅ Model switched to: ${resolved}`);
+    const effortArg = effortMatch[1]?.trim().toLowerCase();
+    const validEfforts = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh']);
+
+    if (!effortArg) {
+      const currentEffort = getCodexReasoningEffort() || '(default)';
+      await sendMessage(
+        msg.chat_jid,
+        `Current effort: ${currentEffort}\n\nUsage: /effort <none|minimal|low|medium|high|xhigh>\nReset: /effort default`
+      );
+      return;
+    }
+
+    if (effortArg === 'default' || effortArg === 'reset') {
+      setCodexReasoningEffort(null);
+      logger.info({ chatJid: msg.chat_jid }, 'Codex reasoning effort cleared');
+      await sendMessage(msg.chat_jid, '✅ Codex reasoning effort reset to default.');
+      return;
+    }
+
+    if (!validEfforts.has(effortArg)) {
+      await sendMessage(msg.chat_jid, 'Usage: /effort <none|minimal|low|medium|high|xhigh>');
+      return;
+    }
+
+    setCodexReasoningEffort(effortArg);
+    logger.info({ chatJid: msg.chat_jid, effort: effortArg }, 'Codex reasoning effort set');
+    await sendMessage(msg.chat_jid, `✅ Codex reasoning effort set to: ${effortArg}`);
     return;
   }
 

@@ -36,7 +36,9 @@ export const TRIGGER_PATTERN = new RegExp(`^@${escapeRegex(ASSISTANT_NAME)}\\b`,
 export const TIMEZONE = process.env.TZ || 'Asia/Shanghai';
 
 // Model override: switch model via /model command
-export const MODEL_OVERRIDE_PATH = path.join(DATA_DIR, 'model_override.json');
+const CLAUDE_MODEL_OVERRIDE_PATH = path.join(DATA_DIR, 'claude_model_override.json');
+const CODEX_MODEL_OVERRIDE_PATH = path.join(DATA_DIR, 'codex_model_override.json');
+const CODEX_EFFORT_OVERRIDE_PATH = path.join(DATA_DIR, 'codex_effort_override.json');
 
 export const MODEL_ALIASES: Record<string, string> = {
   opus: 'claude-opus-4.6',
@@ -44,21 +46,42 @@ export const MODEL_ALIASES: Record<string, string> = {
   haiku: 'claude-haiku-4.5',
 };
 
-export function getModelOverride(): string | null {
+export function getModelOverride(agent: 'claude' | 'codex'): string | null {
+  const targetPath = agent === 'codex' ? CODEX_MODEL_OVERRIDE_PATH : CLAUDE_MODEL_OVERRIDE_PATH;
   try {
-    if (fs.existsSync(MODEL_OVERRIDE_PATH)) {
-      const data = JSON.parse(fs.readFileSync(MODEL_OVERRIDE_PATH, 'utf-8'));
+    if (fs.existsSync(targetPath)) {
+      const data = JSON.parse(fs.readFileSync(targetPath, 'utf-8'));
       return data.model || null;
     }
   } catch { /* ignore */ }
   return null;
 }
 
-export function setModelOverride(model: string | null): void {
+export function setModelOverride(agent: 'claude' | 'codex', model: string | null): void {
+  const targetPath = agent === 'codex' ? CODEX_MODEL_OVERRIDE_PATH : CLAUDE_MODEL_OVERRIDE_PATH;
   if (model) {
-    fs.mkdirSync(path.dirname(MODEL_OVERRIDE_PATH), { recursive: true });
-    fs.writeFileSync(MODEL_OVERRIDE_PATH, JSON.stringify({ model }, null, 2));
+    fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+    fs.writeFileSync(targetPath, JSON.stringify({ model }, null, 2));
   } else {
-    try { fs.unlinkSync(MODEL_OVERRIDE_PATH); } catch { /* ignore */ }
+    try { fs.unlinkSync(targetPath); } catch { /* ignore */ }
+  }
+}
+
+export function getCodexReasoningEffort(): string | null {
+  try {
+    if (fs.existsSync(CODEX_EFFORT_OVERRIDE_PATH)) {
+      const data = JSON.parse(fs.readFileSync(CODEX_EFFORT_OVERRIDE_PATH, 'utf-8'));
+      return data.effort || null;
+    }
+  } catch { /* ignore */ }
+  return null;
+}
+
+export function setCodexReasoningEffort(effort: string | null): void {
+  if (effort) {
+    fs.mkdirSync(path.dirname(CODEX_EFFORT_OVERRIDE_PATH), { recursive: true });
+    fs.writeFileSync(CODEX_EFFORT_OVERRIDE_PATH, JSON.stringify({ effort }, null, 2));
+  } else {
+    try { fs.unlinkSync(CODEX_EFFORT_OVERRIDE_PATH); } catch { /* ignore */ }
   }
 }

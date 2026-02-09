@@ -128,13 +128,29 @@ function writeCodexConfig(): void {
   const configDir = '/home/node/.codex';
   fs.mkdirSync(configDir, { recursive: true });
 
+  const modelOverride = process.env.CODEX_MODEL?.trim();
+  const effortOverride = process.env.CODEX_MODEL_REASONING_EFFORT?.trim();
+
   const lines: string[] = [
     'web_search = "disabled"',
+  ];
+
+  if (modelOverride) {
+    const safeModel = modelOverride.replace(/"/g, '\\"');
+    lines.push(`model = "${safeModel}"`);
+  }
+
+  if (effortOverride) {
+    const safeEffort = effortOverride.replace(/"/g, '\\"');
+    lines.push(`model_reasoning_effort = "${safeEffort}"`);
+  }
+
+  lines.push(
     '[mcp_servers.nanoclaw]',
     'command = "node"',
     'args = ["/app/dist/ipc-mcp-stdio.js"]',
     'env_vars = ["NANOCLAW_CHAT_JID", "NANOCLAW_GROUP_FOLDER", "NANOCLAW_IS_MAIN", "NANOCLAW_IS_SCHEDULED_TASK"]',
-  ];
+  );
 
   if (process.env.BRAVE_API_KEY) {
     lines.push('', '[mcp_servers.brave-search]');

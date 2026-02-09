@@ -15,6 +15,7 @@ import {
   CONTAINER_MAX_OUTPUT_SIZE,
   GROUPS_DIR,
   DATA_DIR,
+  getCodexReasoningEffort,
   getModelOverride
 } from './config.js';
 import { logger } from './logger.js';
@@ -148,6 +149,7 @@ function buildVolumeMounts(
       'ANTHROPIC_DEFAULT_SONNET_MODEL',
       'CODEX_API_KEY',
       'CODEX_MODEL',
+      'CODEX_MODEL_REASONING_EFFORT',
       'OPENAI_API_KEY',
       'OPENAI_BASE_URL',
       'OPENAI_ORG_ID',
@@ -174,14 +176,35 @@ function buildVolumeMounts(
         }
       }
 
-      // Apply model override if set via /model command (Claude only)
-      const modelOverride = getModelOverride();
-      if (modelOverride && agent === 'claude') {
-        const idx = filteredLines.findIndex(l => l.trimStart().startsWith('ANTHROPIC_MODEL='));
-        if (idx !== -1) {
-          filteredLines[idx] = `ANTHROPIC_MODEL=${modelOverride}`;
+      // Apply model override if set via /model command
+      const modelOverride = getModelOverride(agent);
+      if (modelOverride) {
+        if (agent === 'claude') {
+          const idx = filteredLines.findIndex(l => l.trimStart().startsWith('ANTHROPIC_MODEL='));
+          if (idx !== -1) {
+            filteredLines[idx] = `ANTHROPIC_MODEL=${modelOverride}`;
+          } else {
+            filteredLines.push(`ANTHROPIC_MODEL=${modelOverride}`);
+          }
         } else {
-          filteredLines.push(`ANTHROPIC_MODEL=${modelOverride}`);
+          const idx = filteredLines.findIndex(l => l.trimStart().startsWith('CODEX_MODEL='));
+          if (idx !== -1) {
+            filteredLines[idx] = `CODEX_MODEL=${modelOverride}`;
+          } else {
+            filteredLines.push(`CODEX_MODEL=${modelOverride}`);
+          }
+        }
+      }
+
+      if (agent === 'codex') {
+        const effortOverride = getCodexReasoningEffort();
+        if (effortOverride) {
+          const idx = filteredLines.findIndex(l => l.trimStart().startsWith('CODEX_MODEL_REASONING_EFFORT='));
+          if (idx !== -1) {
+            filteredLines[idx] = `CODEX_MODEL_REASONING_EFFORT=${effortOverride}`;
+          } else {
+            filteredLines.push(`CODEX_MODEL_REASONING_EFFORT=${effortOverride}`);
+          }
         }
       }
 
