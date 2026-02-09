@@ -24,6 +24,7 @@ interface AgentResponse {
 
 const AGENT_RESPONSE_SCHEMA = {
   type: 'object',
+  additionalProperties: false,
   properties: {
     outputType: {
       type: 'string',
@@ -39,7 +40,7 @@ const AGENT_RESPONSE_SCHEMA = {
       description: 'Information that will be logged internally but not sent to the user or group.',
     },
   },
-  required: ['outputType'],
+  required: ['outputType', 'userMessage', 'internalLog'],
 } as const;
 
 interface ContainerOutput {
