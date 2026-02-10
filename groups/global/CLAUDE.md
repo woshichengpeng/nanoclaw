@@ -27,8 +27,6 @@ For requests that can take time, consider sending a quick acknowledgment if appr
 
 Files you create are saved in `/workspace/group/`. Use this for notes, research, or anything that should persist.
 
-Your `CLAUDE.md` file in that folder is your memory - update it with important context you want to remember.
-
 ## Memory
 
 The `conversations/` folder contains searchable history of past conversations. Use this to recall context from previous sessions.
@@ -36,8 +34,17 @@ The `conversations/` folder contains searchable history of past conversations. U
 When you learn something important:
 - Create files for structured data (e.g., `customers.md`, `preferences.md`)
 - Split files larger than 500 lines into folders
-- Add recurring context directly to this CLAUDE.md
-- Always index new memory files at the top of CLAUDE.md
+- Keep an index in your memory for the files you create
+
+## Message Formatting
+
+NEVER use markdown. Only use WhatsApp/Telegram formatting:
+- *single asterisks* for bold (NEVER **double asterisks**)
+- _underscores_ for italic
+- • bullet points
+- ```triple backticks``` for code
+
+No ## headings. No [links](url). No **double stars**.
 
 ## TODO Management
 

@@ -19,9 +19,9 @@ This is the **main channel** with elevated privileges (self-modification, group 
 ## Telegram Formatting
 
 Do NOT use markdown headings (##) in Telegram messages. Only use:
-- *Bold* (asterisks)
+- *Bold* (single asterisks) (NEVER **double asterisks**)
 - _Italic_ (underscores)
-- Bullets (bullet points)
+- • Bullet points
 - ```Code blocks``` (triple backticks)
 
 ## Long Tasks
@@ -89,8 +89,7 @@ The `conversations/` folder contains searchable history of past conversations. U
 When you learn something important:
 - Create files for structured data (e.g., `customers.md`, `preferences.md`)
 - Split files larger than 500 lines into folders
-- Add recurring context directly to this CLAUDE.md
-- Index new memory files at the top of CLAUDE.md
+- Keep an index in your memory for the files you create
 
 Global memory at `/workspace/project/groups/global/CLAUDE.md` applies to all groups. Only update when explicitly asked to "remember this globally."
 

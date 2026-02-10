@@ -1200,22 +1200,30 @@ function ensureContainerSystemRunning(): void {
     }
   }
 
-  // Clean up stopped NanoClaw containers from previous runs
+  // Kill and clean up orphaned NanoClaw containers from previous runs
   try {
-    const output = execSync('container ls -a --format {{.Names}}', {
+    const listJson = execSync('container ls -a --format json', {
       stdio: ['pipe', 'pipe', 'pipe'],
       encoding: 'utf-8',
     });
-    const stale = output
-      .split('\n')
-      .map((n) => n.trim())
-      .filter((n) => n.startsWith('nanoclaw-'));
-    if (stale.length > 0) {
-      execSync(`container rm ${stale.join(' ')}`, { stdio: 'pipe' });
-      logger.info({ count: stale.length }, 'Cleaned up stopped containers');
+    const containers = JSON.parse(listJson) as Array<{ configuration: { id: string }; status: string }>;
+    const nanoclawContainers = containers.filter(
+      (c) => c.configuration.id.startsWith('nanoclaw-'),
+    );
+    const running = nanoclawContainers
+      .filter((c) => c.status === 'running')
+      .map((c) => c.configuration.id);
+    if (running.length > 0) {
+      execSync(`container stop ${running.join(' ')}`, { stdio: 'pipe' });
+      logger.info({ count: running.length }, 'Stopped orphaned containers');
+    }
+    const allNames = nanoclawContainers.map((c) => c.configuration.id);
+    if (allNames.length > 0) {
+      execSync(`container rm ${allNames.join(' ')}`, { stdio: 'pipe' });
+      logger.info({ count: allNames.length }, 'Cleaned up stopped containers');
     }
   } catch {
-    // No stopped containers or ls/rm not supported
+    // No containers or cleanup not supported
   }
 }
 

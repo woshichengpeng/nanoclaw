@@ -176,6 +176,12 @@ function buildVolumeMounts(
         }
       }
 
+      // Enable Claude's native memory management
+      if (agent === 'claude') {
+        filteredLines.push('CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1');
+        filteredLines.push('CLAUDE_CODE_DISABLE_AUTO_MEMORY=0');
+      }
+
       // Apply model override if set via /model command
       const modelOverride = getModelOverride(agent);
       if (modelOverride) {
