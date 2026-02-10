@@ -274,8 +274,7 @@ export async function runContainerAgent(
     ? input.agent
     : (DEFAULT_AGENT === 'codex' ? 'codex' : 'claude');
 
-  // Codex doesn't support streaming — skip onOutput
-  const effectiveOnOutput = agent === 'codex' ? undefined : onOutput;
+  const effectiveOnOutput = onOutput;
 
   const mounts = buildVolumeMounts(group, input.isMain, agent, input.chatJid);
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');

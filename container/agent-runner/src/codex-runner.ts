@@ -1,11 +1,14 @@
 /**
  * NanoClaw Codex Runner
- * Runs Codex CLI inside container, receives config via stdin, outputs result to stdout
+ * Runs Codex SDK inside container, receives config via stdin, outputs result to stdout
+ * Supports multi-turn conversations via IPC polling
  */
 
 import fs from 'fs';
 import path from 'path';
-import { spawn, execSync } from 'child_process';
+import { execSync } from 'child_process';
+import { Codex, Thread } from '@openai/codex-sdk';
+import type { AgentMessageItem } from '@openai/codex-sdk';
 
 interface ContainerInput {
   prompt: string;
@@ -53,9 +56,6 @@ interface ContainerOutput {
 const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
 const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
 
-const SCHEMA_PATH = '/tmp/agent_response_schema.json';
-const OUTPUT_PATH = '/tmp/agent_output.json';
-
 // Known model context windows (tokens). Used to set compact thresholds
 // since Codex can't fetch the model catalog when using API key auth.
 const MODEL_CONTEXT_WINDOWS: Record<string, number> = {
@@ -82,6 +82,47 @@ function getContextWindow(model?: string): number {
   }
   return best?.window ?? DEFAULT_CONTEXT_WINDOW;
 }
+
+// --- IPC infrastructure ---
+
+const IPC_INPUT_DIR = '/workspace/ipc/input';
+const IPC_INPUT_CLOSE_SENTINEL = path.join(IPC_INPUT_DIR, '_close');
+const IPC_POLL_MS = 500;
+
+function shouldClose(): boolean {
+  return fs.existsSync(IPC_INPUT_CLOSE_SENTINEL);
+}
+
+function drainIpcInput(): string[] {
+  if (!fs.existsSync(IPC_INPUT_DIR)) return [];
+  const files = fs.readdirSync(IPC_INPUT_DIR)
+    .filter(f => f.endsWith('.json'))
+    .sort();
+  const prompts: string[] = [];
+  for (const file of files) {
+    const filePath = path.join(IPC_INPUT_DIR, file);
+    try {
+      const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+      if (data.prompt) prompts.push(data.prompt);
+      fs.unlinkSync(filePath);
+    } catch (err) {
+      log(`Failed to read IPC input ${file}: ${err}`);
+      try { fs.unlinkSync(filePath); } catch {}
+    }
+  }
+  return prompts;
+}
+
+async function waitForIpcMessage(): Promise<string | null> {
+  while (true) {
+    if (shouldClose()) return null;
+    const prompts = drainIpcInput();
+    if (prompts.length > 0) return prompts.join('\n');
+    await new Promise(resolve => setTimeout(resolve, IPC_POLL_MS));
+  }
+}
+
+// --- Core utilities ---
 
 async function readStdin(): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -121,10 +162,6 @@ function buildPrompt(input: ContainerInput): string {
 
   parts.push(input.prompt);
   return parts.filter(Boolean).join('\n\n');
-}
-
-function writeCodexSchema(): void {
-  fs.writeFileSync(SCHEMA_PATH, JSON.stringify(AGENT_RESPONSE_SCHEMA, null, 2));
 }
 
 function escapeTomlString(s: string): string {
@@ -198,146 +235,107 @@ function writeCodexConfig(): void {
   fs.writeFileSync(path.join(configDir, 'config.toml'), lines.join('\n') + '\n');
 }
 
-function parseAgentMessage(item: unknown): string | undefined {
-  if (!item || typeof item !== 'object') return undefined;
-  const record = item as Record<string, unknown>;
-  if (record.type !== 'agent_message') return undefined;
-  if (typeof record.text === 'string') return record.text;
-  const content = record.content;
-  if (typeof content === 'string') return content;
-  if (Array.isArray(content)) {
-    const textParts = (content as Array<Record<string, unknown>>)
-      .map(part => typeof part.text === 'string' ? part.text : '')
-      .filter(Boolean);
-    if (textParts.length > 0) return textParts.join('');
-  }
-  if (content && typeof content === 'object') {
-    const contentRecord = content as Record<string, unknown>;
-    if (typeof contentRecord.text === 'string') return contentRecord.text;
-  }
-  return undefined;
+// --- SDK client ---
+
+function createCodexClient(): Codex {
+  return new Codex({
+    apiKey: process.env.CODEX_API_KEY || process.env.OPENAI_API_KEY,
+    env: process.env as Record<string, string>,
+  });
 }
 
-async function runCodex(prompt: string, sessionId?: string): Promise<{
-  output: AgentResponse | null;
+// --- Turn execution ---
+
+async function runCodexTurn(
+  thread: Thread,
+  prompt: string,
+): Promise<{
   newSessionId?: string;
   error?: string;
-  lastAgentMessage?: string;
+  closedDuringTurn: boolean;
 }> {
-  const args: string[] = [];
-  if (sessionId) {
-    // Resume mode has a restricted flag set; avoid output-schema here.
-    args.push(
-      'exec',
-      'resume',
-      '--json',
-      '--skip-git-repo-check',
-      '--dangerously-bypass-approvals-and-sandbox',
-      sessionId,
-      prompt
-    );
-  } else {
-    args.push(
-      'exec',
-      '--json',
-      '--output-schema', SCHEMA_PATH,
-      '-o', OUTPUT_PATH,
-      '--dangerously-bypass-approvals-and-sandbox',
-      '--skip-git-repo-check',
-      prompt
-    );
-  }
-
-  let stdoutBuffer = '';
-  let stderrBuffer = '';
   let newSessionId: string | undefined;
-  let lastAgentMessage: string | undefined;
+  let error: string | undefined;
+  let closedDuringTurn = false;
 
-  const child = spawn('codex', args, {
-    cwd: '/workspace/group',
-    env: process.env,
-    stdio: ['ignore', 'pipe', 'pipe']
-  });
+  // AbortController to cancel the turn when close sentinel is detected
+  const abortController = new AbortController();
 
-  child.stdout.on('data', (data) => {
-    stdoutBuffer += data.toString();
-    const lines = stdoutBuffer.split('\n');
-    stdoutBuffer = lines.pop() || '';
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed) continue;
-      try {
-        const event = JSON.parse(trimmed) as Record<string, unknown>;
-        if (event.type === 'thread.started' && typeof event.thread_id === 'string') {
-          newSessionId = event.thread_id;
-        }
-        if (event.type === 'item.completed') {
-          const item = (event as { item?: unknown }).item;
-          const message = parseAgentMessage(item);
-          if (message) lastAgentMessage = message;
-        }
-      } catch {
-        // Ignore malformed JSON lines
-      }
+  // Start IPC polling during turn
+  const pollHandle = setInterval(() => {
+    if (shouldClose()) {
+      closedDuringTurn = true;
+      abortController.abort();
+      clearInterval(pollHandle);
     }
-  });
+  }, IPC_POLL_MS);
 
-  child.stderr.on('data', (data) => {
-    const chunk = data.toString();
-    stderrBuffer += chunk;
-    if (stderrBuffer.length > 4000) {
-      stderrBuffer = stderrBuffer.slice(-4000);
-    }
-  });
-
-  const exitCode = await new Promise<number>((resolve, reject) => {
-    child.on('error', reject);
-    child.on('close', code => resolve(code ?? 1));
-  });
-
-  if (stdoutBuffer.trim()) {
-    try {
-      const event = JSON.parse(stdoutBuffer.trim()) as Record<string, unknown>;
-      if (event.type === 'thread.started' && typeof event.thread_id === 'string') {
-        newSessionId = event.thread_id;
-      }
-      if (event.type === 'item.completed') {
-        const item = (event as { item?: unknown }).item;
-        const message = parseAgentMessage(item);
-        if (message) lastAgentMessage = message;
-      }
-    } catch {
-      // Ignore trailing partial JSON
-    }
-  }
-
-  if (exitCode !== 0) {
-    return {
-      output: null,
-      newSessionId,
-      error: `Codex exited with code ${exitCode}: ${stderrBuffer.trim()}`,
-      lastAgentMessage
-    };
-  }
-
-  let output: AgentResponse | null = null;
   try {
-    if (fs.existsSync(OUTPUT_PATH)) {
-      output = JSON.parse(fs.readFileSync(OUTPUT_PATH, 'utf-8')) as AgentResponse;
+    const streamedResult = await thread.runStreamed(prompt, {
+      outputSchema: AGENT_RESPONSE_SCHEMA,
+      signal: abortController.signal,
+    });
+
+    for await (const event of streamedResult.events) {
+      switch (event.type) {
+        case 'thread.started':
+          newSessionId = event.thread_id;
+          log(`Thread started: ${newSessionId}`);
+          break;
+
+        case 'item.completed': {
+          if (event.item.type === 'agent_message') {
+            const text = (event.item as AgentMessageItem).text;
+            // Try to parse as structured AgentResponse
+            let result: AgentResponse | null = null;
+            try {
+              const parsed = JSON.parse(text);
+              if (parsed.outputType === 'message' || parsed.outputType === 'log') {
+                result = parsed as AgentResponse;
+                if (result.outputType === 'message' && !result.userMessage) {
+                  result = { outputType: 'log', internalLog: result.internalLog };
+                }
+              }
+            } catch {
+              // Not JSON — treat as plain message
+              result = { outputType: 'message', userMessage: text };
+            }
+            if (result) {
+              writeOutput({ status: 'success', result, newSessionId });
+            }
+          }
+          break;
+        }
+
+        case 'turn.completed':
+          log(`Turn completed`);
+          break;
+
+        case 'turn.failed':
+          error = event.error.message;
+          log(`Turn failed: ${error}`);
+          break;
+
+        case 'error':
+          error = event.message;
+          log(`Thread error: ${error}`);
+          break;
+      }
     }
-  } catch {
-    output = null;
+  } catch (err) {
+    // Abort errors are expected when close sentinel is detected
+    if (!closedDuringTurn) {
+      error = err instanceof Error ? err.message : String(err);
+      log(`runCodexTurn error: ${error}`);
+    }
+  } finally {
+    clearInterval(pollHandle);
   }
 
-  if (output && output.outputType === 'message' && !output.userMessage) {
-    output = { outputType: 'log', internalLog: output.internalLog };
-  }
-  if (output && output.outputType !== 'message' && output.outputType !== 'log') {
-    output = null;
-  }
-
-  return { output, newSessionId, lastAgentMessage };
+  return { newSessionId, error, closedDuringTurn };
 }
+
+// --- Memory file auto-commit ---
 
 function autoCommitMemoryFiles(groupFolder: string): void {
   if (!fs.existsSync('/workspace/project/.git')) return;
@@ -392,6 +390,8 @@ function autoCommitMemoryFiles(groupFolder: string): void {
   }
 }
 
+// --- Main entry point ---
+
 async function main(): Promise<void> {
   let input: ContainerInput;
 
@@ -417,9 +417,7 @@ async function main(): Promise<void> {
   }
 
   try {
-    writeCodexSchema();
     writeCodexConfig();
-    try { fs.unlinkSync(OUTPUT_PATH); } catch { /* ignore */ }
   } catch (err) {
     writeOutput({
       status: 'error',
@@ -429,40 +427,94 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const prompt = buildPrompt(input);
+  const codex = createCodexClient();
+  const thread = input.sessionId
+    ? codex.resumeThread(input.sessionId, {
+        workingDirectory: '/workspace/group',
+        skipGitRepoCheck: true,
+        approvalPolicy: 'never',
+        sandboxMode: 'danger-full-access',
+      })
+    : codex.startThread({
+        workingDirectory: '/workspace/group',
+        skipGitRepoCheck: true,
+        approvalPolicy: 'never',
+        sandboxMode: 'danger-full-access',
+      });
+
+  // Drain any IPC messages that arrived before we started
+  let prompt = buildPrompt(input);
+  const earlyPrompts = drainIpcInput();
+  if (earlyPrompts.length > 0) {
+    prompt += '\n' + earlyPrompts.join('\n');
+  }
 
   try {
-    const { output, newSessionId, error, lastAgentMessage } = await runCodex(prompt, input.sessionId);
+    log('Starting Codex agent...');
 
-    let result: AgentResponse | null = output;
-    if (!result && lastAgentMessage) {
-      result = { outputType: 'message', userMessage: lastAgentMessage };
-    }
+    // First turn
+    let turnResult = await runCodexTurn(thread, prompt);
 
-    if (input.isMain) {
-      autoCommitMemoryFiles(input.groupFolder);
-    }
-
-    if (error) {
+    if (turnResult.error && !turnResult.closedDuringTurn) {
+      // If the first turn errored with no output at all, emit error
       writeOutput({
         status: 'error',
         result: null,
-        newSessionId,
-        error
+        newSessionId: turnResult.newSessionId,
+        error: turnResult.error,
       });
       process.exit(1);
     }
 
-    writeOutput({
-      status: 'success',
-      result: result ?? { outputType: 'log' },
-      newSessionId
-    });
+    // Auto-commit memory files after each turn
+    if (input.isMain) {
+      autoCommitMemoryFiles(input.groupFolder);
+    }
+
+    // Multi-turn loop: wait for follow-up messages until _close
+    while (!turnResult.closedDuringTurn) {
+      // Emit session-update marker so host can track the session
+      writeOutput({
+        status: 'success',
+        result: null,
+        newSessionId: turnResult.newSessionId,
+      });
+
+      log('Waiting for next IPC message...');
+      const nextPrompt = await waitForIpcMessage();
+
+      if (nextPrompt === null) {
+        log('Close sentinel detected, exiting');
+        break;
+      }
+
+      log('Received follow-up message, running next turn...');
+      turnResult = await runCodexTurn(thread, nextPrompt);
+
+      // Emit error to host if follow-up turn failed
+      if (turnResult.error) {
+        writeOutput({
+          status: 'error',
+          result: null,
+          newSessionId: turnResult.newSessionId,
+          error: turnResult.error,
+        });
+      }
+
+      if (input.isMain) {
+        autoCommitMemoryFiles(input.groupFolder);
+      }
+    }
+
+    log('Codex agent session ended');
+
   } catch (err) {
+    const errorMessage = err instanceof Error ? err.message : String(err);
+    log(`Agent error: ${errorMessage}`);
     writeOutput({
       status: 'error',
       result: null,
-      error: err instanceof Error ? err.message : String(err)
+      error: errorMessage,
     });
     process.exit(1);
   }
