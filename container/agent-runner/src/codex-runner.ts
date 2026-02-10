@@ -56,6 +56,33 @@ const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
 const SCHEMA_PATH = '/tmp/agent_response_schema.json';
 const OUTPUT_PATH = '/tmp/agent_output.json';
 
+// Known model context windows (tokens). Used to set compact thresholds
+// since Codex can't fetch the model catalog when using API key auth.
+const MODEL_CONTEXT_WINDOWS: Record<string, number> = {
+  'gpt-5.2-codex': 272_000,
+  'gpt-5.2': 128_000,
+  'gpt-4.1': 1_000_000,
+  'gpt-4.1-mini': 1_000_000,
+  'gpt-4.1-nano': 1_000_000,
+  'o3': 200_000,
+  'o4-mini': 200_000,
+};
+const DEFAULT_CONTEXT_WINDOW = 128_000;
+
+function getContextWindow(model?: string): number {
+  if (!model) return DEFAULT_CONTEXT_WINDOW;
+  // Longest prefix match (exact first, then prefix) — matches Codex's own logic
+  let best: { slug: string; window: number } | null = null;
+  for (const [slug, window] of Object.entries(MODEL_CONTEXT_WINDOWS)) {
+    if (model.startsWith(slug)) {
+      if (!best || slug.length > best.slug.length) {
+        best = { slug, window };
+      }
+    }
+  }
+  return best?.window ?? DEFAULT_CONTEXT_WINDOW;
+}
+
 async function readStdin(): Promise<string> {
   return new Promise((resolve, reject) => {
     let data = '';
@@ -88,30 +115,6 @@ function safeReadFile(filePath: string): string | null {
 function buildPrompt(input: ContainerInput): string {
   const parts: string[] = [];
 
-  const globalPaths = [
-    '/workspace/global/CLAUDE.md',
-    '/workspace/project/groups/CLAUDE.md'
-  ];
-
-  let globalClaudeMd: string | null = null;
-  for (const candidate of globalPaths) {
-    const content = safeReadFile(candidate);
-    if (content) {
-      globalClaudeMd = content;
-      break;
-    }
-  }
-
-  const groupClaudeMd = safeReadFile('/workspace/group/CLAUDE.md');
-
-  if (globalClaudeMd) {
-    parts.push(`[GLOBAL CLAUDE.md]\n${globalClaudeMd.trim()}\n[/GLOBAL CLAUDE.md]`);
-  }
-
-  if (groupClaudeMd) {
-    parts.push(`[GROUP CLAUDE.md]\n${groupClaudeMd.trim()}\n[/GROUP CLAUDE.md]`);
-  }
-
   if (input.isScheduledTask) {
     parts.push('[SCHEDULED TASK - The following message was sent automatically and is not coming directly from the user or group.]');
   }
@@ -122,6 +125,16 @@ function buildPrompt(input: ContainerInput): string {
 
 function writeCodexSchema(): void {
   fs.writeFileSync(SCHEMA_PATH, JSON.stringify(AGENT_RESPONSE_SCHEMA, null, 2));
+}
+
+function escapeTomlString(s: string): string {
+  // Use TOML multi-line basic string (""") for content with newlines
+  if (s.includes('\n')) {
+    // Escape backslashes and triple-quotes inside the value
+    const escaped = s.replace(/\\/g, '\\\\').replace(/"""/g, '""\\"');
+    return `"""\n${escaped}"""`;
+  }
+  return `"${s.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
 }
 
 function writeCodexConfig(): void {
@@ -140,12 +153,35 @@ function writeCodexConfig(): void {
     lines.push(`model = "${safeModel}"`);
   }
 
+  // Set context window and compact limit based on model
+  const contextWindow = getContextWindow(modelOverride);
+  const compactLimit = Math.floor(contextWindow * 0.8);
+  lines.push(`model_context_window = ${contextWindow}`);
+  lines.push(`model_auto_compact_token_limit = ${compactLimit}`);
+
   if (effortOverride) {
     const safeEffort = effortOverride.replace(/"/g, '\\"');
     lines.push(`model_reasoning_effort = "${safeEffort}"`);
   }
 
+  // Load global CLAUDE.md as user-level instructions
+  const globalPaths = [
+    '/workspace/global/CLAUDE.md',
+    '/workspace/project/groups/CLAUDE.md'
+  ];
+  for (const candidate of globalPaths) {
+    const content = safeReadFile(candidate);
+    if (content) {
+      lines.push(`instructions = ${escapeTomlString(content.trim())}`);
+      break;
+    }
+  }
+
+  // Let Codex auto-discover group CLAUDE.md as project-level instructions
+  lines.push('project_doc_fallback_filenames = ["CLAUDE.md"]');
+
   lines.push(
+    '',
     '[mcp_servers.nanoclaw]',
     'command = "node"',
     'args = ["/app/dist/ipc-mcp-stdio.js"]',

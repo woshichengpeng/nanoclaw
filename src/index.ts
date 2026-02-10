@@ -629,6 +629,18 @@ async function runAgent(group: RegisteredGroup, prompt: string, chatJid: string)
     }
 
     if (output.status === 'error') {
+      // Check for token overflow errors - clear session so next message starts fresh
+      const errorStr = output.error || '';
+      if (/prompt_tokens_exceeded|context_window|token.*limit|max.*context/i.test(errorStr)) {
+        logger.warn({ group: group.name, agent, error: errorStr }, 'Token overflow detected, clearing session');
+        const entry = sessions[sessionKey];
+        if (entry && typeof entry !== 'string') {
+          delete entry[agent];
+        } else if (typeof entry === 'string' && agent === 'claude') {
+          delete sessions[sessionKey];
+        }
+        saveJson(path.join(DATA_DIR, 'sessions.json'), sessions);
+      }
       logger.error({ group: group.name, error: output.error }, 'Container agent error');
       return 'error';
     }
