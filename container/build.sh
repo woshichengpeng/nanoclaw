@@ -20,7 +20,9 @@ if [[ -n "${1:-}" ]]; then
   TAG="$1"
 fi
 
-# Compile agent-runner TypeScript so dist/ is fresh before Docker COPY
+# Install deps and compile agent-runner TypeScript so dist/ is fresh before Docker COPY
+echo "Installing agent-runner dependencies..."
+(cd "$SCRIPT_DIR/agent-runner" && npm install --prefer-offline)
 echo "Compiling agent-runner TypeScript..."
 (cd "$SCRIPT_DIR/agent-runner" && npm run build)
 echo ""
