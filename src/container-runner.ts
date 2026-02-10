@@ -3,7 +3,7 @@
  * Spawns agent execution in Apple Container and handles IPC
  */
 
-import { exec, spawn } from 'child_process';
+import { ChildProcess, exec, spawn } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -125,6 +125,7 @@ function buildVolumeMounts(
   const groupIpcDir = path.join(DATA_DIR, 'ipc', group.folder);
   fs.mkdirSync(path.join(groupIpcDir, 'messages'), { recursive: true });
   fs.mkdirSync(path.join(groupIpcDir, 'tasks'), { recursive: true });
+  fs.mkdirSync(path.join(groupIpcDir, 'input'), { recursive: true });
   mounts.push({
     hostPath: groupIpcDir,
     containerPath: '/workspace/ipc',
@@ -176,10 +177,11 @@ function buildVolumeMounts(
         }
       }
 
-      // Enable Claude's native memory management
+      // Enable Claude's native memory management and Agent Teams
       if (agent === 'claude') {
         filteredLines.push('CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1');
         filteredLines.push('CLAUDE_CODE_DISABLE_AUTO_MEMORY=0');
+        filteredLines.push('CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1');
       }
 
       // Apply model override if set via /model command
@@ -259,7 +261,9 @@ function buildContainerArgs(
 
 export async function runContainerAgent(
   group: RegisteredGroup,
-  input: ContainerInput
+  input: ContainerInput,
+  onProcess?: (proc: ChildProcess, containerName: string) => void,
+  onOutput?: (output: ContainerOutput) => Promise<void>,
 ): Promise<ContainerOutput> {
   const startTime = Date.now();
 
@@ -269,6 +273,10 @@ export async function runContainerAgent(
   const agent = input.agent === 'codex' || input.agent === 'claude'
     ? input.agent
     : (DEFAULT_AGENT === 'codex' ? 'codex' : 'claude');
+
+  // Codex doesn't support streaming — skip onOutput
+  const effectiveOnOutput = agent === 'codex' ? undefined : onOutput;
+
   const mounts = buildVolumeMounts(group, input.isMain, agent, input.chatJid);
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-${safeName}-${Date.now()}`;
@@ -287,35 +295,79 @@ export async function runContainerAgent(
     containerName,
     mountCount: mounts.length,
     isMain: input.isMain,
-    agent
+    agent,
+    streaming: !!effectiveOnOutput,
   }, 'Spawning container agent');
 
   const logsDir = path.join(GROUPS_DIR, group.folder, 'logs');
   fs.mkdirSync(logsDir, { recursive: true });
+
+  const timeoutMs = group.containerConfig?.timeout || CONTAINER_TIMEOUT;
 
   return new Promise((resolve) => {
     const container = spawn('container', containerArgs, {
       stdio: ['pipe', 'pipe', 'pipe']
     });
 
-    let stdout = '';
+    // Notify caller of the process (for GroupQueue registration)
+    if (onProcess) {
+      onProcess(container, containerName);
+    }
+
     let stderr = '';
-    let stdoutTruncated = false;
     let stderrTruncated = false;
+    let newSessionId: string | undefined;
+
+    // For streaming mode: chain output callbacks to preserve order
+    let outputChain = Promise.resolve();
+
+    // For non-streaming (Codex) mode: buffer stdout as before
+    let stdout = '';
+    let stdoutTruncated = false;
+
+    // Real-time OUTPUT marker parsing buffer (streaming mode)
+    let parseBuffer = '';
 
     container.stdin.write(JSON.stringify(input));
     container.stdin.end();
 
     container.stdout.on('data', (data) => {
-      if (stdoutTruncated) return;
       const chunk = data.toString();
-      const remaining = CONTAINER_MAX_OUTPUT_SIZE - stdout.length;
-      if (chunk.length > remaining) {
-        stdout += chunk.slice(0, remaining);
-        stdoutTruncated = true;
-        logger.warn({ group: group.name, size: stdout.length }, 'Container stdout truncated due to size limit');
+
+      if (effectiveOnOutput) {
+        // Streaming mode: parse OUTPUT markers in real time
+        parseBuffer += chunk;
+        let startIdx: number;
+        while ((startIdx = parseBuffer.indexOf(OUTPUT_START_MARKER)) !== -1) {
+          const endIdx = parseBuffer.indexOf(OUTPUT_END_MARKER, startIdx);
+          if (endIdx === -1) break; // Incomplete marker, wait for more data
+
+          const jsonStr = parseBuffer.slice(
+            startIdx + OUTPUT_START_MARKER.length,
+            endIdx
+          ).trim();
+          parseBuffer = parseBuffer.slice(endIdx + OUTPUT_END_MARKER.length);
+
+          try {
+            const parsed: ContainerOutput = JSON.parse(jsonStr);
+            if (parsed.newSessionId) newSessionId = parsed.newSessionId;
+            resetTimeout(); // Activity-aware: reset on output
+            outputChain = outputChain.then(() => effectiveOnOutput(parsed));
+          } catch (err) {
+            logger.warn({ group: group.name, err }, 'Failed to parse streamed output marker');
+          }
+        }
       } else {
-        stdout += chunk;
+        // Non-streaming (Codex) mode: buffer stdout
+        if (stdoutTruncated) return;
+        const remaining = CONTAINER_MAX_OUTPUT_SIZE - stdout.length;
+        if (chunk.length > remaining) {
+          stdout += chunk.slice(0, remaining);
+          stdoutTruncated = true;
+          logger.warn({ group: group.name, size: stdout.length }, 'Container stdout truncated due to size limit');
+        } else {
+          stdout += chunk;
+        }
       }
     });
 
@@ -338,7 +390,10 @@ export async function runContainerAgent(
 
     let timedOut = false;
 
-    const timeout = setTimeout(() => {
+    // Activity-aware timeout: resets when OUTPUT markers are parsed
+    let timeout = setTimeout(killOnTimeout, timeoutMs);
+
+    function killOnTimeout() {
       timedOut = true;
       logger.error({ group: group.name, containerName }, 'Container timeout, stopping gracefully');
       exec(`container stop ${containerName}`, { timeout: 15000 }, (err) => {
@@ -347,7 +402,12 @@ export async function runContainerAgent(
           container.kill('SIGKILL');
         }
       });
-    }, group.containerConfig?.timeout || CONTAINER_TIMEOUT);
+    }
+
+    function resetTimeout() {
+      clearTimeout(timeout);
+      timeout = setTimeout(killOnTimeout, timeoutMs);
+    }
 
     container.on('close', (code) => {
       clearTimeout(timeout);
@@ -373,7 +433,7 @@ export async function runContainerAgent(
         resolve({
           status: 'error',
           result: null,
-          error: `Container timed out after ${group.containerConfig?.timeout || CONTAINER_TIMEOUT}ms`,
+          error: `Container timed out after ${timeoutMs}ms`,
         });
         return;
       }
@@ -389,7 +449,7 @@ export async function runContainerAgent(
         `IsMain: ${input.isMain}`,
         `Duration: ${duration}ms`,
         `Exit Code: ${code}`,
-        `Stdout Truncated: ${stdoutTruncated}`,
+        `Streaming: ${!!effectiveOnOutput}`,
         `Stderr Truncated: ${stderrTruncated}`,
         ``
       ];
@@ -409,10 +469,14 @@ export async function runContainerAgent(
           ``,
           `=== Stderr${stderrTruncated ? ' (TRUNCATED)' : ''} ===`,
           stderr,
-          ``,
-          `=== Stdout${stdoutTruncated ? ' (TRUNCATED)' : ''} ===`,
-          stdout
+          ``
         );
+        if (!effectiveOnOutput) {
+          logLines.push(
+            `=== Stdout${stdoutTruncated ? ' (TRUNCATED)' : ''} ===`,
+            stdout
+          );
+        }
       } else {
         logLines.push(
           `=== Input Summary ===`,
@@ -428,6 +492,17 @@ export async function runContainerAgent(
       fs.writeFileSync(logFile, logLines.join('\n'));
       logger.debug({ logFile, verbose: isVerbose }, 'Container log written');
 
+      // Streaming mode: results were already delivered via onOutput callbacks
+      if (effectiveOnOutput) {
+        outputChain.then(() => {
+          logger.info({ group: group.name, duration, streaming: true }, 'Container completed (streaming)');
+          resolve({ status: code === 0 ? 'success' : 'error', result: null, newSessionId,
+            ...(code !== 0 ? { error: `Container exited with code ${code}: ${stderr.slice(-200)}` } : {}) });
+        });
+        return;
+      }
+
+      // Non-streaming (Codex) mode: parse output from buffered stdout
       if (code !== 0) {
         logger.error({
           group: group.name,

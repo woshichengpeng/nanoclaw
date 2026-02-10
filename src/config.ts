@@ -21,7 +21,9 @@ export const CONTAINER_IMAGE_CLAUDE = process.env.CONTAINER_IMAGE_CLAUDE
   || process.env.CONTAINER_IMAGE
   || 'nanoclaw-agent:latest';
 export const CONTAINER_IMAGE_CODEX = process.env.CONTAINER_IMAGE_CODEX || 'nanoclaw-codex:latest';
-export const CONTAINER_TIMEOUT = parseInt(process.env.CONTAINER_TIMEOUT || '300000', 10);
+export const CONTAINER_TIMEOUT = parseInt(process.env.CONTAINER_TIMEOUT || '1800000', 10); // 30min default for streaming
+export const IDLE_TIMEOUT = parseInt(process.env.IDLE_TIMEOUT || '1800000', 10); // 30min idle before closing container
+export const MAX_CONCURRENT_CONTAINERS = Math.max(1, parseInt(process.env.MAX_CONCURRENT_CONTAINERS || '5', 10));
 export const CONTAINER_MAX_OUTPUT_SIZE = parseInt(process.env.CONTAINER_MAX_OUTPUT_SIZE || '10485760', 10); // 10MB default
 export const IPC_POLL_INTERVAL = 1000;
 

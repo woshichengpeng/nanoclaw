@@ -1,3 +1,4 @@
+import { ChildProcess } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import { CronExpressionParser } from 'cron-parser';
@@ -11,15 +12,19 @@ import {
   DATA_DIR,
   TIMEZONE,
   DEFAULT_AGENT,
+  IDLE_TIMEOUT,
 } from './config.js';
 import { runContainerAgent, writeTasksSnapshot } from './container-runner.js';
+import { GroupQueue } from './group-queue.js';
 import { logger } from './logger.js';
 
 export interface SchedulerDependencies {
-  sendMessage: (jid: string, text: string) => Promise<void>;
   registeredGroups: () => Record<string, RegisteredGroup>;
   getSessions: () => Session;
-  processIpcMessages: (groupFolder: string, isMain: boolean) => Promise<string[]>;
+  queue: GroupQueue;
+  onProcess: (groupJid: string, proc: ChildProcess, containerName: string, groupFolder: string) => void;
+  sendMessage: (jid: string, text: string) => Promise<void>;
+  assistantName: string;
 }
 
 function normalizeAgent(agent?: string): AgentType {
@@ -82,6 +87,13 @@ async function runTask(task: ScheduledTask, deps: SchedulerDependencies): Promis
     ? getSessionForAgent(sessions, task.chat_jid, agent)
     : undefined;
 
+  let idleTimer: ReturnType<typeof setTimeout> | null = null;
+  const resetIdleTimer = () => {
+    if (idleTimer) clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => deps.queue.closeStdin(task.chat_jid), IDLE_TIMEOUT);
+  };
+  resetIdleTimer();
+
   try {
     const output = await runContainerAgent(group, {
       prompt: task.prompt,
@@ -91,27 +103,28 @@ async function runTask(task: ScheduledTask, deps: SchedulerDependencies): Promis
       isMain,
       isScheduledTask: true,
       agent
+    },
+    (proc, name) => deps.onProcess(task.chat_jid, proc, name, task.group_folder),
+    async (streamedOutput) => {
+      if (streamedOutput.result?.outputType === 'message' && streamedOutput.result?.userMessage) {
+        await deps.sendMessage(task.chat_jid, `${deps.assistantName}: ${streamedOutput.result.userMessage}`);
+      }
+      if (streamedOutput.result) resetIdleTimer();
     });
+
+    if (idleTimer) clearTimeout(idleTimer);
 
     if (output.status === 'error') {
       error = output.error || 'Unknown error';
-    } else if (output.result) {
-      if (output.result.outputType === 'message' && output.result.userMessage) {
-        await deps.sendMessage(task.chat_jid, `${ASSISTANT_NAME}: ${output.result.userMessage}`);
-      }
-      result = output.result.userMessage || output.result.internalLog || null;
     }
+    // Results were already sent via streaming callback, just log
+    result = 'Streamed';
 
     logger.info({ taskId: task.id, durationMs: Date.now() - startTime }, 'Task completed');
   } catch (err) {
+    if (idleTimer) clearTimeout(idleTimer);
     error = err instanceof Error ? err.message : String(err);
     logger.error({ taskId: task.id, error }, 'Task failed');
-  }
-
-  try {
-    await deps.processIpcMessages(task.group_folder, isMain);
-  } catch (err) {
-    logger.error({ taskId: task.id, err }, 'Error processing IPC messages for scheduled task');
   }
 
   const durationMs = Date.now() - startTime;
@@ -156,7 +169,7 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
           continue;
         }
 
-        await runTask(currentTask, deps);
+        deps.queue.enqueueTask(currentTask.chat_jid, currentTask.id, () => runTask(currentTask, deps));
       }
     } catch (err) {
       logger.error({ err }, 'Error in scheduler loop');

@@ -11,6 +11,7 @@ import {
   TRIGGER_PATTERN,
   MAIN_GROUP_FOLDER,
   IPC_POLL_INTERVAL,
+  IDLE_TIMEOUT,
   TIMEZONE,
   DEFAULT_AGENT,
   CONTAINER_IMAGE_CLAUDE,
@@ -25,7 +26,8 @@ import {
 import { RegisteredGroup, Session, NewMessage, AgentType } from './types.js';
 import { initDatabase, storeMessageDirect, storeChatMetadata, getMessagesSince, getMessagesSinceRowId, getMaxRowIdBefore, getAllTasks, getAllChats, migrateAddChannelPrefix } from './db.js';
 import { startSchedulerLoop } from './task-scheduler.js';
-import { AgentResponse, runContainerAgent, writeTasksSnapshot, writeGroupsSnapshot, AvailableGroup } from './container-runner.js';
+import { AgentResponse, ContainerOutput, runContainerAgent, writeTasksSnapshot, writeGroupsSnapshot, AvailableGroup } from './container-runner.js';
+import { GroupQueue } from './group-queue.js';
 import { loadJson, saveJson } from './utils.js';
 import { logger } from './logger.js';
 import { setupTelegram, telegramSendMessage, telegramSendFile, telegramSetTyping } from './telegram.js';
@@ -35,6 +37,9 @@ let lastRowIdByChat: Record<string, number> = {};
 let sessions: Session = {};
 let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, string> = {};
+
+// GroupQueue for managing concurrent long-lived containers
+const queue = new GroupQueue();
 
 // === Container Rebuild State ===
 interface ImageBackupState {
@@ -336,23 +341,42 @@ function getAvailableGroups(): AvailableGroup[] {
     }));
 }
 
-async function processMessage(msg: NewMessage): Promise<void> {
-  const group = registeredGroups[msg.chat_jid];
-  if (!group) return;
+/**
+ * Format messages since a timestamp into XML for the agent prompt.
+ */
+function formatMessages(chatJid: string, sinceTimestamp: string): { prompt: string; count: number } {
+  const missedMessages = getMessagesSince(chatJid, sinceTimestamp, ASSISTANT_NAME);
 
+  const lines = missedMessages.map(m => {
+    const escapeXml = (s: string) => s
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+    const mediaAttr = m.media_path ? ` media="/workspace/group/media/${path.basename(m.media_path)}"` : '';
+    const replyAttr = m.reply_to_content ? ` reply_to="${escapeXml(m.reply_to_content)}"` : '';
+    return `<message sender="${escapeXml(m.sender_name)}" time="${m.timestamp}"${mediaAttr}${replyAttr}>${escapeXml(m.content)}</message>`;
+  });
+  const prompt = `<messages>\n${lines.join('\n')}\n</messages>`;
+  return { prompt, count: missedMessages.length };
+}
+
+/**
+ * Handle slash commands from a message. Returns true if the message was a command.
+ */
+async function handleCommand(msg: NewMessage, group: RegisteredGroup): Promise<boolean> {
   const content = msg.content.trim();
-  const isMainGroup = group.folder === MAIN_GROUP_FOLDER;
 
-  // Handle /newsession command - start a fresh session
+  // Handle /newsession command
   if (content === '/newsession' || content.endsWith('/newsession')) {
     delete sessions[msg.chat_jid];
     saveState();
     logger.info({ group: group.name, chatJid: msg.chat_jid }, 'Session cleared by /newsession command');
     await sendMessage(msg.chat_jid, '✅ Session cleared. Next message will start a fresh conversation.');
-    return;
+    return true;
   }
 
-  // Handle /help command - show available commands
+  // Handle /help command
   if (content === '/help' || content.endsWith('/help')) {
     const currentAgent = getGroupAgent(group);
     const currentModel = getCurrentModel(currentAgent);
@@ -377,21 +401,21 @@ async function processMessage(msg: NewMessage): Promise<void> {
       `Current model: ${currentModel}`,
       ...(currentEffort ? [`Current effort: ${currentEffort}`] : []),
     ].join('\n'));
-    return;
+    return true;
   }
 
-  // Handle /agent command - switch agent for this group
+  // Handle /agent command
   const agentMatch = content.match(/^\/agent(?:\s+(.+))?$/i);
   if (agentMatch) {
     const agentArg = agentMatch[1]?.trim().toLowerCase();
     if (!agentArg) {
       const current = getGroupAgent(group);
       await sendMessage(msg.chat_jid, `Current agent: ${current}`);
-      return;
+      return true;
     }
     if (agentArg !== 'claude' && agentArg !== 'codex') {
       await sendMessage(msg.chat_jid, 'Usage: /agent <claude|codex>');
-      return;
+      return true;
     }
 
     for (const regGroup of Object.values(registeredGroups)) {
@@ -405,10 +429,10 @@ async function processMessage(msg: NewMessage): Promise<void> {
     if (agentArg === 'codex' && !process.env.CODEX_API_KEY && !process.env.OPENAI_API_KEY) {
       await sendMessage(msg.chat_jid, '⚠️ Codex requires CODEX_API_KEY or OPENAI_API_KEY in .env.');
     }
-    return;
+    return true;
   }
 
-  // Handle /model command - switch model for current agent
+  // Handle /model command
   const modelMatch = content.match(/^\/model(?:\s+(.+))?$/i);
   if (modelMatch) {
     const modelArg = modelMatch[1]?.trim();
@@ -430,7 +454,7 @@ async function processMessage(msg: NewMessage): Promise<void> {
         lines.splice(3, 0, 'Aliases:', aliases, '');
       }
       await sendMessage(msg.chat_jid, lines.join('\n'));
-      return;
+      return true;
     }
     if (modelArg.toLowerCase() === 'default' || modelArg.toLowerCase() === 'reset') {
       const currentAgent = getGroupAgent(group);
@@ -438,7 +462,7 @@ async function processMessage(msg: NewMessage): Promise<void> {
       const defaultModel = getEnvDefaultModel(currentAgent) || '(env default)';
       logger.info({ chatJid: msg.chat_jid, agent: currentAgent }, 'Model override cleared');
       await sendMessage(msg.chat_jid, `✅ Model reset for ${currentAgent}: ${defaultModel}`);
-      return;
+      return true;
     }
     const currentAgent = getGroupAgent(group);
     const resolved = currentAgent === 'claude'
@@ -446,7 +470,6 @@ async function processMessage(msg: NewMessage): Promise<void> {
       : modelArg;
 
     if (currentAgent === 'claude') {
-      // Validate model by making a minimal API call before saving
       await sendMessage(msg.chat_jid, `🔄 Testing model: ${resolved}...`);
       const baseUrl = (process.env.ANTHROPIC_BASE_URL || 'https://api.anthropic.com').replace(/\/+$/, '');
       const apiKey = process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN || '';
@@ -469,28 +492,28 @@ async function processMessage(msg: NewMessage): Promise<void> {
           const body = await resp.text().catch(() => '');
           logger.warn({ model: resolved, status: resp.status, body }, 'Model validation failed');
           await sendMessage(msg.chat_jid, `❌ Model unavailable: ${resolved}\nHTTP ${resp.status}: ${body.slice(0, 200)}`);
-          return;
+          return true;
         }
       } catch (err) {
         logger.warn({ model: resolved, err }, 'Model validation request failed');
         await sendMessage(msg.chat_jid, `❌ Cannot reach model: ${resolved}\n${err instanceof Error ? err.message : String(err)}`);
-        return;
+        return true;
       }
     }
 
     setModelOverride(currentAgent, resolved);
     logger.info({ chatJid: msg.chat_jid, agent: currentAgent, model: resolved }, 'Model override set');
     await sendMessage(msg.chat_jid, `✅ Model switched for ${currentAgent}: ${resolved}`);
-    return;
+    return true;
   }
 
-  // Handle /effort command - switch Codex reasoning effort
+  // Handle /effort command
   const effortMatch = content.match(/^\/effort(?:\s+(.+))?$/i);
   if (effortMatch) {
     const currentAgent = getGroupAgent(group);
     if (currentAgent !== 'codex') {
       await sendMessage(msg.chat_jid, '⚠️ /effort only applies to Codex. Switch with /agent codex first.');
-      return;
+      return true;
     }
 
     const effortArg = effortMatch[1]?.trim().toLowerCase();
@@ -502,102 +525,117 @@ async function processMessage(msg: NewMessage): Promise<void> {
         msg.chat_jid,
         `Current effort: ${currentEffort}\n\nUsage: /effort <none|minimal|low|medium|high|xhigh>\nReset: /effort default`
       );
-      return;
+      return true;
     }
 
     if (effortArg === 'default' || effortArg === 'reset') {
       setCodexReasoningEffort(null);
       logger.info({ chatJid: msg.chat_jid }, 'Codex reasoning effort cleared');
       await sendMessage(msg.chat_jid, '✅ Codex reasoning effort reset to default.');
-      return;
+      return true;
     }
 
     if (!validEfforts.has(effortArg)) {
       await sendMessage(msg.chat_jid, 'Usage: /effort <none|minimal|low|medium|high|xhigh>');
-      return;
+      return true;
     }
 
     setCodexReasoningEffort(effortArg);
     logger.info({ chatJid: msg.chat_jid, effort: effortArg }, 'Codex reasoning effort set');
     await sendMessage(msg.chat_jid, `✅ Codex reasoning effort set to: ${effortArg}`);
-    return;
+    return true;
   }
 
-  // Main group responds to all messages; for non-main groups, check if trigger is required and present
-  if (!isMainGroup && group.requiresTrigger !== false && !TRIGGER_PATTERN.test(content)) return;
+  return false;
+}
 
-  // Get all messages since last agent interaction so the session has full context
-  const sinceTimestamp = lastAgentTimestamp[msg.chat_jid] || '';
-  const missedMessages = getMessagesSince(msg.chat_jid, sinceTimestamp, ASSISTANT_NAME);
+/**
+ * Process all pending messages for a group (called by GroupQueue).
+ * This is the core function that formats messages, runs the agent with streaming,
+ * and handles the streaming output.
+ */
+async function processGroupMessages(chatJid: string): Promise<void> {
+  const group = registeredGroups[chatJid];
+  if (!group) return;
 
-  const lines = missedMessages.map(m => {
-    // Escape XML special characters in content
-    const escapeXml = (s: string) => s
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;');
-    const mediaAttr = m.media_path ? ` media="/workspace/group/media/${path.basename(m.media_path)}"` : '';
+  const isMainGroup = group.folder === MAIN_GROUP_FOLDER;
+  const sinceTimestamp = lastAgentTimestamp[chatJid] || '';
+  const { prompt, count } = formatMessages(chatJid, sinceTimestamp);
 
-    // If this is a reply, include the original message content (already extracted from Telegram)
-    const replyAttr = m.reply_to_content ? ` reply_to="${escapeXml(m.reply_to_content)}"` : '';
+  if (count === 0) return;
 
-    return `<message sender="${escapeXml(m.sender_name)}" time="${m.timestamp}"${mediaAttr}${replyAttr}>${escapeXml(m.content)}</message>`;
-  });
-  const prompt = `<messages>\n${lines.join('\n')}\n</messages>`;
+  // Check trigger for non-main groups
+  if (!isMainGroup && group.requiresTrigger !== false) {
+    const recentMessages = getMessagesSince(chatJid, sinceTimestamp, ASSISTANT_NAME);
+    const hasTrigger = recentMessages.some(m => TRIGGER_PATTERN.test(m.content.trim()));
+    if (!hasTrigger) return;
+  }
 
-  if (!prompt) return;
+  logger.info({ group: group.name, chatJid, messageCount: count }, 'Processing group messages');
 
-  logger.info({ group: group.name, messageCount: missedMessages.length }, 'Processing message');
-
-  // Send typing indicator every 4 seconds while agent is running
-  await setTyping(msg.chat_jid, true);
+  // Send typing indicator
+  await setTyping(chatJid, true);
   const typingInterval = setInterval(() => {
-    setTyping(msg.chat_jid, true).catch(() => {});
+    setTyping(chatJid, true).catch(() => {});
   }, 4000);
 
-  let response: AgentResponse | 'error';
+  // Set up idle timer to close container after inactivity
+  let idleTimer: ReturnType<typeof setTimeout> | null = null;
+  const resetIdleTimer = () => {
+    if (idleTimer) clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => queue.closeStdin(chatJid), IDLE_TIMEOUT);
+  };
+  resetIdleTimer();
+
   try {
-    response = await runAgent(group, prompt, msg.chat_jid);
+    const result = await runAgent(group, prompt, chatJid, async (streamedOutput) => {
+      // Process IPC messages inline during streaming
+      await processGroupIpcMessages(group.folder, isMainGroup);
+
+      // Send streamed results to user
+      if (streamedOutput.result?.outputType === 'message' && streamedOutput.result?.userMessage) {
+        await sendMessage(chatJid, streamedOutput.result.userMessage);
+      }
+
+      if (streamedOutput.result?.internalLog) {
+        logger.info(
+          { group: group.name, outputType: streamedOutput.result.outputType },
+          `Agent: ${streamedOutput.result.internalLog}`,
+        );
+      }
+
+      // Reset idle timer on output
+      if (streamedOutput.result) resetIdleTimer();
+    });
+
+    if (idleTimer) clearTimeout(idleTimer);
+
+    // Process any remaining IPC messages
+    await processGroupIpcMessages(group.folder, isMainGroup);
+
+    if (result !== 'error') {
+      // Advance cursor — agent processed successfully
+      lastAgentTimestamp[chatJid] = new Date().toISOString();
+      saveState();
+    }
   } finally {
     clearInterval(typingInterval);
-  }
-
-  if (response === 'error') {
-    // Container or agent error — don't advance cursor, will retry
-    return;
-  }
-
-  // Process any IPC messages from this agent run BEFORE deciding to send result
-  // This ensures send_message calls take precedence over result
-  const ipcMessagesSent = await processGroupIpcMessages(group.folder, isMainGroup);
-  const sentToThisChat = ipcMessagesSent.includes(msg.chat_jid);
-
-  // Update timestamp — agent processed successfully (whether it responded or stayed silent)
-  lastAgentTimestamp[msg.chat_jid] = msg.timestamp;
-
-  if (response.outputType === 'message' && response.userMessage && !sentToThisChat) {
-    await sendMessage(msg.chat_jid, response.userMessage);
-  } else if (sentToThisChat) {
-    logger.debug({ chatJid: msg.chat_jid }, 'Skipping result send - IPC message already sent');
-  }
-
-  if (response.internalLog) {
-    logger.info(
-      { group: group.name, outputType: response.outputType },
-      `Agent: ${response.internalLog}`,
-    );
+    if (idleTimer) clearTimeout(idleTimer);
   }
 }
 
-async function runAgent(group: RegisteredGroup, prompt: string, chatJid: string): Promise<AgentResponse | 'error'> {
+async function runAgent(
+  group: RegisteredGroup,
+  prompt: string,
+  chatJid: string,
+  onOutput?: (output: ContainerOutput) => Promise<void>
+): Promise<'success' | 'error'> {
   const isMain = group.folder === MAIN_GROUP_FOLDER;
   const agent = getGroupAgent(group);
-  // Use chat_jid as session key so each platform gets its own session context
   const sessionKey = chatJid;
   const sessionId = getSessionForAgent(sessionKey, agent);
 
-  // Update tasks snapshot for container to read (filtered by group)
+  // Update tasks snapshot for container to read
   const tasks = getAllTasks();
   writeTasksSnapshot(group.folder, isMain, tasks.map(t => ({
     id: t.id,
@@ -609,9 +647,18 @@ async function runAgent(group: RegisteredGroup, prompt: string, chatJid: string)
     next_run: t.next_run
   })));
 
-  // Update available groups snapshot (main group only can see all groups)
+  // Update available groups snapshot
   const availableGroups = getAvailableGroups();
   writeGroupsSnapshot(group.folder, isMain, availableGroups, new Set(Object.keys(registeredGroups)));
+
+  // Wrap onOutput to track session IDs and detect token overflow
+  const wrappedOnOutput = onOutput ? async (output: ContainerOutput) => {
+    if (output.newSessionId) {
+      setSessionForAgent(sessionKey, agent, output.newSessionId);
+      saveJson(path.join(DATA_DIR, 'sessions.json'), sessions);
+    }
+    await onOutput(output);
+  } : undefined;
 
   try {
     const output = await runContainerAgent(group, {
@@ -621,15 +668,20 @@ async function runAgent(group: RegisteredGroup, prompt: string, chatJid: string)
       chatJid,
       isMain,
       agent
-    });
+    },
+    // onProcess: register with GroupQueue
+    (proc, containerName) => {
+      queue.registerProcess(chatJid, proc, containerName, group.folder);
+    },
+    wrappedOnOutput);
 
+    // For non-streaming (Codex), session ID comes in final output
     if (output.newSessionId) {
       setSessionForAgent(sessionKey, agent, output.newSessionId);
       saveJson(path.join(DATA_DIR, 'sessions.json'), sessions);
     }
 
     if (output.status === 'error') {
-      // Check for token overflow errors - clear session so next message starts fresh
       const errorStr = output.error || '';
       if (/prompt_tokens_exceeded|context_window|token.*limit|max.*context/i.test(errorStr)) {
         logger.warn({ group: group.name, agent, error: errorStr }, 'Token overflow detected, clearing session');
@@ -645,7 +697,20 @@ async function runAgent(group: RegisteredGroup, prompt: string, chatJid: string)
       return 'error';
     }
 
-    return output.result ?? { outputType: 'log' };
+    // For Codex (non-streaming), send the result directly
+    if (!onOutput && output.result) {
+      if (output.result.outputType === 'message' && output.result.userMessage) {
+        await sendMessage(chatJid, output.result.userMessage);
+      }
+      if (output.result.internalLog) {
+        logger.info(
+          { group: group.name, outputType: output.result.outputType },
+          `Agent: ${output.result.internalLog}`,
+        );
+      }
+    }
+
+    return 'success';
   } catch (err) {
     logger.error({ group: group.name, err }, 'Agent error');
     return 'error';
@@ -1076,33 +1141,64 @@ async function startMessageLoop(): Promise<void> {
         }
 
         const messages = getMessagesSinceRowId(jid, sinceRowId, ASSISTANT_NAME);
-        if (messages.length > 0) {
-          logger.info({ chatJid: jid, count: messages.length }, 'New messages');
+        if (messages.length === 0) continue;
+
+        logger.info({ chatJid: jid, count: messages.length }, 'New messages');
+
+        // Handle commands immediately (don't go through queue)
+        let hasNonCommandMessages = false;
+        for (const msg of messages) {
+          const group = registeredGroups[msg.chat_jid];
+          if (!group) continue;
+
+          const isCommand = await handleCommand(msg, group);
+
+          // Advance cursor for all messages (commands and non-commands)
+          if (typeof msg.row_id === 'number') {
+            lastRowIdByChat[jid] = msg.row_id;
+          }
+          lastTimestampByChat[jid] = msg.timestamp;
+          if (!lastTimestamp || msg.timestamp > lastTimestamp) {
+            lastTimestamp = msg.timestamp;
+          }
+          saveState();
+
+          if (!isCommand) {
+            hasNonCommandMessages = true;
+          }
         }
 
-        for (const msg of messages) {
-          try {
-            await processMessage(msg);
-            // Only advance cursor after successful processing for at-least-once delivery
-            if (typeof msg.row_id === 'number') {
-              lastRowIdByChat[jid] = msg.row_id;
-            }
-            lastTimestampByChat[jid] = msg.timestamp;
-            if (!lastTimestamp || msg.timestamp > lastTimestamp) {
-              lastTimestamp = msg.timestamp;
-            }
-            saveState();
-          } catch (err) {
-            logger.error({ err, msg: msg.id }, 'Error processing message, will retry');
-            // Stop processing this chat - failed message will be retried next loop
-            break;
-          }
+        if (!hasNonCommandMessages) continue;
+
+        // Try to pipe formatted messages to active container first
+        const sinceTimestamp = lastAgentTimestamp[jid] || '';
+        const { prompt, count } = formatMessages(jid, sinceTimestamp);
+        if (count > 0 && queue.sendMessage(jid, prompt)) {
+          logger.debug({ chatJid: jid, count }, 'Messages piped to active container');
+        } else if (count > 0) {
+          // No active container — enqueue for processing
+          queue.enqueueMessageCheck(jid);
         }
       }
     } catch (err) {
       logger.error({ err }, 'Error in message loop');
     }
     await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL));
+  }
+}
+
+/**
+ * Recover pending messages on startup — enqueue any groups that have
+ * unprocessed messages since the last agent timestamp.
+ */
+function recoverPendingMessages(): void {
+  for (const chatJid of Object.keys(registeredGroups)) {
+    const sinceTimestamp = lastAgentTimestamp[chatJid] || '';
+    const pending = getMessagesSince(chatJid, sinceTimestamp, ASSISTANT_NAME);
+    if (pending.length > 0) {
+      logger.info({ chatJid, count: pending.length }, 'Recovering pending messages');
+      queue.enqueueMessageCheck(chatJid);
+    }
   }
 }
 
@@ -1252,17 +1348,34 @@ async function main(): Promise<void> {
     logger.info('Feishu/Lark channel enabled');
   }
 
+  // Wire GroupQueue
+  queue.setProcessMessagesFn(processGroupMessages);
+
   // Start core message processing (not channel-specific)
   startSchedulerLoop({
-    sendMessage,
     registeredGroups: () => registeredGroups,
     getSessions: () => sessions,
-    processIpcMessages: processGroupIpcMessages
+    queue,
+    onProcess: (groupJid, proc, containerName, groupFolder) => {
+      queue.registerProcess(groupJid, proc, containerName, groupFolder);
+    },
+    sendMessage,
+    assistantName: ASSISTANT_NAME,
   });
   startIpcWatcher();
+
+  // Recover messages that arrived while we were down
+  recoverPendingMessages();
+
   startMessageLoop();
 
   startRollbackMonitor();
+
+  // Graceful shutdown
+  process.on('SIGTERM', () => {
+    logger.info('SIGTERM received, shutting down...');
+    queue.shutdown(10000).then(() => process.exit(0));
+  });
 }
 
 main().catch(err => {
