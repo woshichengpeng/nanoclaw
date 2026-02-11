@@ -1,0 +1,139 @@
+# NanoClaw Security Model
+
+## Trust Model
+
+| Entity | Trust Level | Rationale |
+|--------|-------------|-----------|
+| Main group | Trusted | Private self-chat, admin control |
+| Non-main groups | Untrusted | Other users may be malicious |
+| Container agents | Sandboxed | Isolated execution environment |
+| Telegram messages | User input | Potential prompt injection |
+
+## Security Boundaries
+
+### 1. Container Isolation (Primary Boundary)
+
+Agents execute in Apple Container (lightweight Linux VMs), providing:
+- **Process isolation** - Container processes cannot affect the host
+- **Filesystem isolation** - Only explicitly mounted directories are visible
+- **Non-root execution** - Runs as unprivileged `node` user (uid 1000)
+- **Ephemeral containers** - Fresh environment per invocation (`--rm`)
+
+This is the primary security boundary. Rather than relying on application-level permission checks, the attack surface is limited by what's mounted.
+
+### 2. Mount Security
+
+**External Allowlist** - Mount permissions stored at `~/.config/nanoclaw/mount-allowlist.json`, which is:
+- Outside project root
+- Never mounted into containers
+- Cannot be modified by agents
+
+**Default Blocked Patterns:**
+```
+.ssh, .gnupg, .aws, .azure, .gcloud, .kube, .docker,
+credentials, .env, .netrc, .npmrc, id_rsa, id_ed25519,
+private_key, .secret
+```
+
+**Protections:**
+- Symlink resolution before validation (prevents traversal attacks)
+- Container path validation (rejects `..` and absolute paths)
+- `nonMainReadOnly` option forces read-only for non-main groups
+
+### 3. Session Isolation
+
+Each group has isolated Pi sessions at `data/sessions/{group}/.pi/agent/`:
+- Groups cannot see other groups' conversation history
+- Session data includes full message history and file contents read
+- Prevents cross-group information disclosure
+
+### 4. IPC Authorization
+
+Messages and task operations are verified against group identity:
+
+| Operation | Main Group | Non-Main Group |
+|-----------|------------|----------------|
+| Send message to own chat | ✓ | ✓ |
+| Send message to other chats | ✓ | ✗ |
+| Schedule task for self | ✓ | ✓ |
+| Schedule task for others | ✓ | ✗ |
+| View all tasks | ✓ | Own only |
+| Manage other groups | ✓ | ✗ |
+
+### 5. Credential Handling
+
+**Mounted Credentials:**
+- Provider auth tokens (filtered from `.env`, read-only)
+
+**NOT Mounted:**
+- Telegram bot token (host-only, not mounted into containers)
+- Mount allowlist - external, never mounted
+- Any credentials matching blocked patterns
+
+**Credential Filtering:**
+Only these environment variables are exposed to containers:
+```typescript
+const allowedVars = [
+  'ANTHROPIC_API_KEY',
+  'ANTHROPIC_AUTH_TOKEN',
+  'ANTHROPIC_BASE_URL',
+  'OPENAI_API_KEY',
+  'OPENAI_BASE_URL',
+  'OPENAI_ORG_ID',
+  'OPENAI_PROJECT',
+  'GOOGLE_API_KEY',
+  'GROQ_API_KEY',
+  'MISTRAL_API_KEY',
+  'OPENROUTER_API_KEY',
+  'XAI_API_KEY',
+  'COHERE_API_KEY',
+  'AZURE_OPENAI_API_KEY',
+  'AZURE_OPENAI_ENDPOINT',
+  'AZURE_OPENAI_API_VERSION',
+  'PI_CODING_AGENT_DIR',
+  'PI_DEFAULT_MODEL',
+  'BRAVE_API_KEY'
+];
+```
+
+> **Note:** Provider credentials are mounted so that Pi can authenticate when the agent runs. However, this means the agent itself can discover these credentials via Bash or file operations. Ideally, the runtime would authenticate without exposing credentials to the agent's execution environment, but I couldn't figure this out. **PRs welcome** if you have ideas for credential isolation.
+
+## Privilege Comparison
+
+| Capability | Main Group | Non-Main Group |
+|------------|------------|----------------|
+| Project root access | `/workspace/project` (rw) | None |
+| Group folder | `/workspace/group` (rw) | `/workspace/group` (rw) |
+| Global memory | Implicit via project | `/workspace/global` (ro) |
+| Additional mounts | Configurable | Read-only unless allowed |
+| Network access | Unrestricted | Unrestricted |
+| IPC tools | All | All |
+
+## Security Architecture Diagram
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                        UNTRUSTED ZONE                             │
+│  Telegram Messages (potentially malicious)                       │
+└────────────────────────────────┬─────────────────────────────────┘
+                                 │
+                                 ▼ Trigger check, input escaping
+┌──────────────────────────────────────────────────────────────────┐
+│                     HOST PROCESS (TRUSTED)                        │
+│  • Message routing                                                │
+│  • IPC authorization                                              │
+│  • Mount validation (external allowlist)                          │
+│  • Container lifecycle                                            │
+│  • Credential filtering                                           │
+└────────────────────────────────┬─────────────────────────────────┘
+                                 │
+                                 ▼ Explicit mounts only
+┌──────────────────────────────────────────────────────────────────┐
+│                CONTAINER (ISOLATED/SANDBOXED)                     │
+│  • Agent execution                                                │
+│  • Bash commands (sandboxed)                                      │
+│  • File operations (limited to mounts)                            │
+│  • Network access (unrestricted)                                  │
+│  • Cannot modify security config                                  │
+└──────────────────────────────────────────────────────────────────┘
+```
