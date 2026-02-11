@@ -25,6 +25,18 @@ import { validateAdditionalMounts } from './mount-security.js';
 // Sentinel markers for robust output parsing (must match agent-runner)
 const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
 const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
+const ERROR_LOG_TAIL_SIZE = 8192;
+
+function appendTail(current: string, chunk: string, limit: number): string {
+  if (!chunk) {
+    return current.length > limit ? current.slice(-limit) : current;
+  }
+  const combined = current + chunk;
+  if (combined.length <= limit) {
+    return combined;
+  }
+  return combined.slice(combined.length - limit);
+}
 
 function getHomeDir(): string {
   const home = process.env.HOME || os.homedir();
@@ -315,6 +327,7 @@ export async function runContainerAgent(
 
     let stderr = '';
     let stderrTruncated = false;
+    let stderrTail = '';
     let newSessionId: string | undefined;
 
     // For streaming mode: chain output callbacks to preserve order
@@ -323,6 +336,9 @@ export async function runContainerAgent(
     // For non-streaming (Codex) mode: buffer stdout as before
     let stdout = '';
     let stdoutTruncated = false;
+    let stdoutTail = '';
+    const stderrTailLabel = `=== Stderr Tail (last ${ERROR_LOG_TAIL_SIZE} chars) ===`;
+    const stdoutTailLabel = `=== Stdout Tail (last ${ERROR_LOG_TAIL_SIZE} chars) ===`;
 
     // Real-time OUTPUT marker parsing buffer (streaming mode)
     let parseBuffer = '';
@@ -332,6 +348,7 @@ export async function runContainerAgent(
 
     container.stdout.on('data', (data) => {
       const chunk = data.toString();
+      stdoutTail = appendTail(stdoutTail, chunk, ERROR_LOG_TAIL_SIZE);
 
       if (effectiveOnOutput) {
         // Streaming mode: parse OUTPUT markers in real time
@@ -372,6 +389,7 @@ export async function runContainerAgent(
 
     container.stderr.on('data', (data) => {
       const chunk = data.toString();
+      stderrTail = appendTail(stderrTail, chunk, ERROR_LOG_TAIL_SIZE);
       const lines = chunk.trim().split('\n');
       for (const line of lines) {
         if (line) logger.debug({ container: group.folder }, line);
@@ -422,6 +440,12 @@ export async function runContainerAgent(
           `Container: ${containerName}`,
           `Duration: ${duration}ms`,
           `Exit Code: ${code}`,
+          ``,
+          stderrTailLabel,
+          stderrTail,
+          ``,
+          stdoutTailLabel,
+          stdoutTail,
         ].join('\n'));
 
         logger.error(
@@ -455,7 +479,7 @@ export async function runContainerAgent(
 
       const isError = code !== 0;
 
-      if (isVerbose || isError) {
+      if (isVerbose) {
         logLines.push(
           `=== Input ===`,
           JSON.stringify(input, null, 2),
@@ -476,6 +500,19 @@ export async function runContainerAgent(
             stdout
           );
         }
+      } else if (isError) {
+        logLines.push(
+          `=== Error Summary ===`,
+          `Prompt length: ${input.prompt.length} chars`,
+          `Session ID: ${input.sessionId || 'new'}`,
+          ``,
+          stderrTailLabel,
+          stderrTail,
+          ``,
+          stdoutTailLabel,
+          stdoutTail,
+          ``
+        );
       } else {
         logLines.push(
           `=== Input Summary ===`,
