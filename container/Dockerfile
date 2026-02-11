@@ -49,6 +49,13 @@ RUN npm install
 COPY agent-runner/ ./
 COPY skills /app/skills
 
+# Install skill dependencies (if any)
+RUN for dir in /app/skills/*; do \
+    if [ -f "$dir/package.json" ]; then \
+      (cd "$dir" && npm install --omit=dev); \
+    fi; \
+  done
+
 # Build TypeScript
 RUN npm run build
 
