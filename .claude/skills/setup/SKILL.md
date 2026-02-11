@@ -1,13 +1,13 @@
 ---
 name: setup
-description: Run initial NanoClaw setup. Use when user wants to install dependencies, authenticate WhatsApp, register their main channel, or start the background services. Triggers on "setup", "install", "configure nanoclaw", or first-time setup requests.
+description: Run initial NanoClaw setup. Use when user wants to install dependencies, configure Pi SDK auth, authenticate Telegram/Feishu, register their main channel, or start the background services. Triggers on "setup", "install", "configure nanoclaw", or first-time setup requests.
 ---
 
-# NanoClaw Setup
+# NanoClaw Setup (Pi SDK + Telegram/Feishu)
 
-Run all commands automatically. Only pause when user action is required (scanning QR codes).
+Run all commands automatically. Only pause when user action is required (bot creation, token entry, or confirming chats).
 
-**UX Note:** When asking the user questions, prefer using the `AskUserQuestion` tool instead of just outputting text. This integrates with Claude's built-in question/answer system for a better experience.
+**UX Note:** When asking the user questions, prefer using the `AskUserQuestion` tool instead of just outputting text. This integrates with the built-in question/answer system for a better experience.
 
 ## 1. Install Dependencies
 
@@ -16,6 +16,8 @@ npm install
 ```
 
 ## 2. Install Container Runtime
+
+NanoClaw uses **Apple Container** by default on macOS. Docker is supported via the `/convert-to-docker` skill.
 
 First, detect the platform and check what's available:
 
@@ -64,7 +66,7 @@ container system start
 container --version
 ```
 
-**Note:** NanoClaw automatically starts the Apple Container system when it launches, so you don't need to start it manually after reboots.
+**Note:** NanoClaw auto-starts the Apple Container system when it launches, so you don't need to start it manually after reboots.
 
 #### Option B: Docker
 
@@ -73,51 +75,114 @@ Tell the user:
 
 **Use the `/convert-to-docker` skill** to convert the codebase to Docker, then continue to Section 3.
 
-## 3. Configure Claude Authentication
+## 3. Configure Pi SDK Authentication
+
+NanoClaw runs the **Pi Coding Agent SDK** inside containers. Credentials are resolved in this order:
+1. `~/.pi/agent/auth.json` (from Pi `/login` or manual edit)
+2. Environment variables from `.env` (API keys)
+
+The host `~/.pi/agent/` directory is mounted into containers at `/home/node/.pi/agent`.
 
 Ask the user:
-> Do you want to use your **Claude subscription** (Pro/Max) or an **Anthropic API key**?
+> Do you want to authenticate with **Pi subscriptions** (Claude Pro/Max, Copilot, etc.) or **API keys**?
 
-### Option 1: Claude Subscription (Recommended)
+### Option 1: Pi Subscription Login
 
 Tell the user:
-> Open another terminal window and run:
-> ```
-> claude setup-token
-> ```
-> A browser window will open for you to log in. Once authenticated, the token will be displayed in your terminal. Either:
-> 1. Paste it here and I'll add it to `.env` for you, or
-> 2. Add it to `.env` yourself as `CLAUDE_CODE_OAUTH_TOKEN=<your-token>`
+> Run `/login` in your Pi CLI and follow the prompts. Tokens are stored at `~/.pi/agent/auth.json`.
+>
+> If you're already in a Pi session, just type `/login` now and pick a provider.
 
-If they give you the token, add it to `.env`:
+Verify:
 
 ```bash
-echo "CLAUDE_CODE_OAUTH_TOKEN=<token>" > .env
+ls -l ~/.pi/agent/auth.json
 ```
 
-### Option 2: API Key
+### Option 2: API Keys in `.env`
 
-Ask if they have an existing key to copy or need to create one.
+Ask which providers they want (Anthropic, OpenAI, OpenRouter, etc.). Add keys to `.env`:
 
-**Copy existing:**
 ```bash
-grep "^ANTHROPIC_API_KEY=" /path/to/source/.env > .env
+cat > .env << 'EOF'
+ANTHROPIC_API_KEY=
+OPENAI_API_KEY=
+OPENROUTER_API_KEY=
+MISTRAL_API_KEY=
+GROQ_API_KEY=
+XAI_API_KEY=
+COHERE_API_KEY=
+GOOGLE_API_KEY=
+AZURE_OPENAI_API_KEY=
+AZURE_OPENAI_ENDPOINT=
+AZURE_OPENAI_API_VERSION=
+# Optional defaults
+PI_DEFAULT_MODEL=
+EOF
 ```
 
-**Create new:**
+Tell the user to fill in the keys they plan to use.
+
+Verify:
+
 ```bash
-echo 'ANTHROPIC_API_KEY=' > .env
+grep -E "^(ANTHROPIC_API_KEY|OPENAI_API_KEY|OPENROUTER_API_KEY|MISTRAL_API_KEY|GROQ_API_KEY|XAI_API_KEY|COHERE_API_KEY|GOOGLE_API_KEY|AZURE_OPENAI_API_KEY|AZURE_OPENAI_ENDPOINT|AZURE_OPENAI_API_VERSION|PI_DEFAULT_MODEL)=" .env
 ```
 
-Tell the user to add their key from https://console.anthropic.com/
+## 4. Configure Telegram Bot
 
-**Verify:**
+**USER ACTION REQUIRED**
+
+Tell the user:
+> Create a Telegram bot with [@BotFather](https://t.me/BotFather) and copy the bot token.
+>
+> Then either:
+> - Start a personal chat with the bot (press **Start**), or
+> - Add the bot to a group where you want to use NanoClaw.
+
+If they provide the token, add it to `.env`:
+
 ```bash
-KEY=$(grep "^ANTHROPIC_API_KEY=" .env | cut -d= -f2)
-[ -n "$KEY" ] && echo "API key configured: ${KEY:0:10}...${KEY: -4}" || echo "Missing"
+if grep -q '^TELEGRAM_BOT_TOKEN=' .env; then
+  perl -pi -e 's/^TELEGRAM_BOT_TOKEN=.*/TELEGRAM_BOT_TOKEN=<token>/' .env
+else
+  echo 'TELEGRAM_BOT_TOKEN=<token>' >> .env
+fi
 ```
 
-## 4. Build Container Image
+**Group privacy note:** If you want the bot to see *all* group messages (e.g., for the main channel or `requiresTrigger: false` groups), disable privacy in BotFather: `/setprivacy` → **Disable**.
+
+## 5. (Optional) Configure Feishu/Lark Bot
+
+Feishu is optional. If the user wants it, set up a Feishu (Lark) app with a bot and event subscription.
+
+Tell the user:
+> Create a Feishu/Lark app, enable **Bot**, and add the `im.message.receive_v1` event.
+> Copy the App ID and App Secret, then add the bot to the chat.
+>
+> Use `FEISHU_DOMAIN=feishu` for the China (Feishu) domain. Otherwise omit it for Lark.
+
+Add to `.env`:
+
+```bash
+if grep -q '^FEISHU_APP_ID=' .env; then
+  perl -pi -e 's/^FEISHU_APP_ID=.*/FEISHU_APP_ID=<app_id>/' .env
+else
+  echo 'FEISHU_APP_ID=<app_id>' >> .env
+fi
+
+if grep -q '^FEISHU_APP_SECRET=' .env; then
+  perl -pi -e 's/^FEISHU_APP_SECRET=.*/FEISHU_APP_SECRET=<app_secret>/' .env
+else
+  echo 'FEISHU_APP_SECRET=<app_secret>' >> .env
+fi
+
+if ! grep -q '^FEISHU_DOMAIN=' .env; then
+  echo 'FEISHU_DOMAIN=feishu' >> .env  # only if using Feishu China
+fi
+```
+
+## 6. Build Container Image
 
 Build the NanoClaw agent container:
 
@@ -125,9 +190,7 @@ Build the NanoClaw agent container:
 ./container/build.sh
 ```
 
-This creates the `nanoclaw-agent:latest` image with Node.js, Chromium, Claude Code CLI, and agent-browser.
-
-Verify the build succeeded by running a simple test (this auto-detects which runtime you're using):
+Verify the build succeeded by running a simple test (auto-detects runtime):
 
 ```bash
 if which docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
@@ -137,41 +200,22 @@ else
 fi
 ```
 
-## 5. WhatsApp Authentication
-
-**USER ACTION REQUIRED**
-
-Run the authentication script:
-
-```bash
-npm run auth
-```
-
-Tell the user:
-> A QR code will appear. On your phone:
-> 1. Open WhatsApp
-> 2. Tap **Settings → Linked Devices → Link a Device**
-> 3. Scan the QR code
-
-Wait for the script to output "Successfully authenticated" then continue.
-
-If it says "Already authenticated", skip to the next step.
-
-## 6. Configure Assistant Name
+## 7. Configure Assistant Name (Optional)
 
 Ask the user:
 > What trigger word do you want to use? (default: `Andy`)
 >
-> Messages starting with `@TriggerWord` will be sent to Claude.
+> Messages starting with `@TriggerWord` will be sent to the agent.
 
-If they choose something other than `Andy`, update it in these places:
-1. `groups/CLAUDE.md` - Change "# Andy" and "You are Andy" to the new name
-2. `groups/main/CLAUDE.md` - Same changes at the top
-3. `data/registered_groups.json` - Use `@NewName` as the trigger when registering groups
+If they choose something other than `Andy`, update:
+1. `.env` - set `ASSISTANT_NAME=NewName`
+2. `groups/global/CLAUDE.md` - Change "# Andy" and "You are Andy" to the new name
+3. `groups/main/CLAUDE.md` - Same changes at the top
+4. `data/registered_groups.json` - Use `@NewName` as the trigger when registering groups
 
 Store their choice - you'll use it when creating the registered_groups.json and when telling them how to test.
 
-## 7. Understand the Security Model
+## 8. Understand the Security Model
 
 Before registering your main channel, you need to understand an important security concept.
 
@@ -185,13 +229,13 @@ Before registering your main channel, you need to understand an important securi
 > - Can write to global memory that all groups can read
 > - Has read-write access to the entire NanoClaw project
 >
-> **Recommendation:** Use your personal "Message Yourself" chat or a solo WhatsApp group as your main channel. This ensures only you have admin control.
+> **Recommendation:** Use your personal Telegram chat with the bot ("Saved Messages") or a solo Telegram group.
 >
 > **Question:** Which setup will you use for your main channel?
 >
 > Options:
-> 1. Personal chat (Message Yourself) - Recommended
-> 2. Solo WhatsApp group (just me)
+> 1. Personal Telegram chat (Saved Messages) - Recommended
+> 2. Solo Telegram group (just me)
 > 3. Group with other people (I understand the security implications)
 
 If they choose option 3, ask a follow-up:
@@ -207,37 +251,37 @@ If they choose option 3, ask a follow-up:
 > 1. Yes, I understand and want to proceed
 > 2. No, let me use a personal chat or solo group instead
 
-## 8. Register Main Channel
+## 9. Register Main Channel (Telegram)
+
+**Note:** The main channel must be **Telegram**. Feishu/Lark can be added as secondary groups, not as the main admin channel.
 
 Ask the user:
-> Do you want to use your **personal chat** (message yourself) or a **WhatsApp group** as your main control channel?
+> Do you want to use your **personal Telegram chat** (Saved Messages) or a **Telegram group** as your main control channel?
 
 For personal chat:
-> Send any message to yourself in WhatsApp (the "Message Yourself" chat). Tell me when done.
+> Open the bot chat and send any message (or `/start`). Tell me when done.
 
 For group:
-> Send any message in the WhatsApp group you want to use as your main channel. Tell me when done.
+> Add the bot to the group and send any message. Tell me when done.
+> If you want the bot to read all messages (no `@Trigger` required), disable privacy in BotFather: `/setprivacy` → **Disable**.
 
 After user confirms, start the app briefly to capture the message:
 
 ```bash
-timeout 10 npm run dev || true
+timeout 15 npm run dev || true
 ```
 
-Then find the JID from the database:
+Then find the Telegram chat ID from the database:
 
 ```bash
-# For personal chat (ends with @s.whatsapp.net)
-sqlite3 store/messages.db "SELECT DISTINCT chat_jid FROM messages WHERE chat_jid LIKE '%@s.whatsapp.net' ORDER BY timestamp DESC LIMIT 5"
-
-# For group (ends with @g.us)
-sqlite3 store/messages.db "SELECT DISTINCT chat_jid FROM messages WHERE chat_jid LIKE '%@g.us' ORDER BY timestamp DESC LIMIT 5"
+sqlite3 store/messages.db "SELECT chat_jid, sender_name, content, timestamp FROM messages WHERE chat_jid LIKE 'tg:%' ORDER BY timestamp DESC LIMIT 10"
 ```
 
-Create/update `data/registered_groups.json` using the JID from above and the assistant name from step 5:
+Create/update `data/registered_groups.json` using the `tg:` chat ID and the assistant name:
+
 ```json
 {
-  "JID_HERE": {
+  "tg:CHAT_ID_HERE": {
     "name": "main",
     "folder": "main",
     "trigger": "@ASSISTANT_NAME",
@@ -247,16 +291,44 @@ Create/update `data/registered_groups.json` using the JID from above and the ass
 ```
 
 Ensure the groups folder exists:
+
 ```bash
 mkdir -p groups/main/logs
 ```
 
-## 9. Configure External Directory Access (Mount Allowlist)
+## 10. (Optional) Register Feishu/Lark Chats
+
+If they want Feishu/Lark:
+
+1. Add the Feishu bot to a chat and send a message.
+2. Run:
+   ```bash
+   timeout 15 npm run dev || true
+   sqlite3 store/messages.db "SELECT chat_jid, sender_name, content, timestamp FROM messages WHERE chat_jid LIKE 'fs:%' ORDER BY timestamp DESC LIMIT 10"
+   ```
+3. Add the `fs:` chat ID to `data/registered_groups.json` with a **non-`main`** folder:
+   ```json
+   {
+     "fs:CHAT_ID_HERE": {
+       "name": "feishu-team",
+       "folder": "feishu-team",
+       "trigger": "@ASSISTANT_NAME",
+       "added_at": "CURRENT_ISO_TIMESTAMP",
+       "channel": "feishu"
+     }
+   }
+   ```
+4. Create the folder:
+   ```bash
+   mkdir -p groups/feishu-team/logs
+   ```
+
+## 11. Configure External Directory Access (Mount Allowlist)
 
 Ask the user:
 > Do you want the agent to be able to access any directories **outside** the NanoClaw project?
 >
-> Examples: Git repositories, project folders, documents you want Claude to work on.
+> Examples: Git repositories, project folders, documents you want the agent to work on.
 >
 > **Note:** This is optional. Without configuration, agents can only access their own group folders.
 
@@ -278,7 +350,7 @@ Skip to the next step.
 
 If **yes**, ask follow-up questions:
 
-### 9a. Collect Directory Paths
+### 11a. Collect Directory Paths
 
 Ask the user:
 > Which directories do you want to allow access to?
@@ -295,14 +367,14 @@ For each directory they provide, ask:
 > Read-write is needed for: code changes, creating files, git commits
 > Read-only is safer for: reference docs, config examples, templates
 
-### 9b. Configure Non-Main Group Access
+### 11b. Configure Non-Main Group Access
 
 Ask the user:
-> Should **non-main groups** (other WhatsApp chats you add later) be restricted to **read-only** access even if read-write is allowed for the directory?
+> Should **non-main groups** (other chats you add later) be restricted to **read-only** access even if read-write is allowed for the directory?
 >
 > Recommended: **Yes** - this prevents other groups from modifying files even if you grant them access to a directory.
 
-### 9c. Create the Allowlist
+### 11c. Create the Allowlist
 
 Create the allowlist file based on their answers:
 
@@ -358,50 +430,25 @@ Tell the user:
 > }
 > ```
 
-## 10. Configure launchd Service
+## 12. Configure launchd Service (macOS)
 
-Generate the plist file with correct paths automatically:
+Generate the plist file from the template with correct paths:
 
 ```bash
 NODE_PATH=$(which node)
 PROJECT_PATH=$(pwd)
 HOME_PATH=$HOME
+ASSISTANT_NAME_VALUE=$(grep '^ASSISTANT_NAME=' .env | cut -d= -f2)
+ASSISTANT_NAME_VALUE=${ASSISTANT_NAME_VALUE:-Andy}
 
-cat > ~/Library/LaunchAgents/com.nanoclaw.plist << EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.nanoclaw</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>${NODE_PATH}</string>
-        <string>${PROJECT_PATH}/dist/index.js</string>
-    </array>
-    <key>WorkingDirectory</key>
-    <string>${PROJECT_PATH}</string>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <true/>
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>PATH</key>
-        <string>/usr/local/bin:/usr/bin:/bin:${HOME_PATH}/.local/bin</string>
-        <key>HOME</key>
-        <string>${HOME_PATH}</string>
-    </dict>
-    <key>StandardOutPath</key>
-    <string>${PROJECT_PATH}/logs/nanoclaw.log</string>
-    <key>StandardErrorPath</key>
-    <string>${PROJECT_PATH}/logs/nanoclaw.error.log</string>
-</dict>
-</plist>
-EOF
+sed -e "s|{{NODE_PATH}}|${NODE_PATH}|g" \
+    -e "s|{{PROJECT_ROOT}}|${PROJECT_PATH}|g" \
+    -e "s|{{HOME}}|${HOME_PATH}|g" \
+    -e "s|<string>Andy</string>|<string>${ASSISTANT_NAME_VALUE}</string>|" \
+    launchd/com.nanoclaw.plist > ~/Library/LaunchAgents/com.nanoclaw.plist
 
-echo "Created launchd plist with:"
-echo "  Node: ${NODE_PATH}"
+echo "Created launchd plist with:" 
+echo "  Node: ${NODE_PATH}" 
 echo "  Project: ${PROJECT_PATH}"
 ```
 
@@ -414,40 +461,48 @@ launchctl load ~/Library/LaunchAgents/com.nanoclaw.plist
 ```
 
 Verify it's running:
+
 ```bash
 launchctl list | grep nanoclaw
 ```
 
-## 11. Test
+## 13. Test
 
 Tell the user (using the assistant name they configured):
 > Send `@ASSISTANT_NAME hello` in your registered chat.
 
 Check the logs:
+
 ```bash
 tail -f logs/nanoclaw.log
 ```
 
-The user should receive a response in WhatsApp.
+The user should receive a response in Telegram (or Feishu if configured).
 
 ## Troubleshooting
 
 **Service not starting**: Check `logs/nanoclaw.error.log`
 
-**Container agent fails with "Claude Code process exited with code 1"**:
+**Container agent fails with "Agent process exited with code 1"**:
 - Ensure the container runtime is running:
   - Apple Container: `container system start`
   - Docker: `docker info` (start Docker Desktop on macOS, or `sudo systemctl start docker` on Linux)
 - Check container logs: `cat groups/main/logs/container-*.log | tail -50`
 
-**No response to messages**:
-- Verify the trigger pattern matches (e.g., `@AssistantName` at start of message)
-- Check that the chat JID is in `data/registered_groups.json`
+**No response to Telegram messages**:
+- Verify `TELEGRAM_BOT_TOKEN` in `.env`
+- Ensure the bot is added to the chat and the chat is registered in `data/registered_groups.json`
+- If using a group without `@Trigger`, disable privacy in BotFather
 - Check `logs/nanoclaw.log` for errors
 
-**WhatsApp disconnected**:
-- The service will show a macOS notification
-- Run `npm run auth` to re-authenticate
+**No response to Feishu messages**:
+- Verify `FEISHU_APP_ID` and `FEISHU_APP_SECRET` in `.env`
+- Ensure event subscription includes `im.message.receive_v1`
+- Confirm the bot is added to the chat
+- Check `logs/nanoclaw.log` for "Feishu WebSocket client started"
+
+**Invalid Telegram bot token**:
+- Update `TELEGRAM_BOT_TOKEN` in `.env`
 - Restart the service: `launchctl kickstart -k gui/$(id -u)/com.nanoclaw`
 
 **Unload service**:
