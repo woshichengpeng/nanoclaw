@@ -57,8 +57,8 @@ From the main channel, manage groups and tasks:
 
 Switch model per group:
 ```
-/agent anthropic/claude-sonnet-4.5
-/agent openai/gpt-4.1
+/agent github-copilot/claude-opus-4.6
+/agent github-copilot/gpt-4.1
 ```
 
 ## Architecture

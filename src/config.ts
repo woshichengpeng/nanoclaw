@@ -16,7 +16,7 @@ export const GROUPS_DIR = path.resolve(PROJECT_ROOT, 'groups');
 export const DATA_DIR = path.resolve(PROJECT_ROOT, 'data');
 export const MAIN_GROUP_FOLDER = 'main';
 
-export const DEFAULT_MODEL = (process.env.NANOCLAW_DEFAULT_MODEL || process.env.PI_DEFAULT_MODEL || 'anthropic/claude-sonnet-4.5').trim();
+export const DEFAULT_MODEL = (process.env.NANOCLAW_DEFAULT_MODEL || process.env.PI_DEFAULT_MODEL || '').trim();
 export const CONTAINER_IMAGE = process.env.CONTAINER_IMAGE || 'nanoclaw-agent:latest';
 export const CONTAINER_TIMEOUT = parseInt(process.env.CONTAINER_TIMEOUT || '1800000', 10); // 30min default for streaming
 export const IDLE_TIMEOUT = parseInt(process.env.IDLE_TIMEOUT || '1800000', 10); // 30min idle before closing container

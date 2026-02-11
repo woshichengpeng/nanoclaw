@@ -181,7 +181,7 @@ export const DATA_DIR = path.resolve(PROJECT_ROOT, 'data');
 // Container configuration
 export const DEFAULT_MODEL = process.env.NANOCLAW_DEFAULT_MODEL
   || process.env.PI_DEFAULT_MODEL
-  || 'anthropic/claude-sonnet-4.5';
+  || '';
 export const CONTAINER_IMAGE = process.env.CONTAINER_IMAGE || 'nanoclaw-agent:latest';
 export const CONTAINER_TIMEOUT = parseInt(process.env.CONTAINER_TIMEOUT || '1800000', 10);
 export const IPC_POLL_INTERVAL = 1000;
@@ -381,7 +381,7 @@ This allows the agent to understand the conversation context even if it wasn't m
 | Command | Example | Effect |
 |---------|---------|--------|
 | `@Assistant [message]` | `@Andy what's the weather?` | Talk to agent |
-| `/agent [provider/model]` | `/agent anthropic/claude-sonnet-4.5` | Show or switch the model for this group |
+| `/agent [provider/model]` | `/agent github-copilot/claude-opus-4.6` | Show or switch the model for this group |
 | `/model [provider/model]` | `/model openai/gpt-4.1` | Set global model override |
 | `/thinking [level]` | `/thinking high` | Set global thinking level |
 
