@@ -40,6 +40,13 @@ let lastAgentTimestamp: Record<string, string> = {};
 // GroupQueue for managing concurrent long-lived containers
 const queue = new GroupQueue();
 
+// Active idle-timer reset functions, keyed by chatJid
+const activeIdleTimerResetters = new Map<string, () => void>();
+
+// Tracks whether the last container run succeeded, keyed by chatJid.
+// Used by onContainerDone to decide cursor advancement after checkUnconsumedInput.
+const lastContainerResult = new Map<string, boolean>();
+
 // === Container Rebuild State ===
 interface ImageBackupState {
   hasBackup: boolean;
@@ -564,6 +571,9 @@ async function processGroupMessages(chatJid: string): Promise<void> {
   };
   resetIdleTimer();
 
+  // Register so piped messages can reset the idle timer
+  activeIdleTimerResetters.set(chatJid, resetIdleTimer);
+
   try {
     const result = await runAgent(group, prompt, chatJid, async (streamedOutput) => {
       // Process IPC messages inline during streaming
@@ -590,12 +600,10 @@ async function processGroupMessages(chatJid: string): Promise<void> {
     // Process any remaining IPC messages
     await processGroupIpcMessages(group.folder, isMainGroup);
 
-    if (result !== 'error') {
-      // Advance cursor — agent processed successfully
-      lastAgentTimestamp[chatJid] = new Date().toISOString();
-      saveState();
-    }
+    // Store result for onContainerDone callback to decide cursor advancement
+    lastContainerResult.set(chatJid, result !== 'error');
   } finally {
+    activeIdleTimerResetters.delete(chatJid);
     clearInterval(typingInterval);
     if (idleTimer) clearTimeout(idleTimer);
   }
@@ -1318,6 +1326,20 @@ async function main(): Promise<void> {
 
   // Wire GroupQueue
   queue.setProcessMessagesFn(processGroupMessages);
+  queue.setOnMessagePipedFn((groupJid) => {
+    const resetFn = activeIdleTimerResetters.get(groupJid);
+    if (resetFn) resetFn();
+  });
+  queue.setOnContainerDoneFn((groupJid, hadUnconsumedInput) => {
+    const succeeded = lastContainerResult.get(groupJid);
+    lastContainerResult.delete(groupJid);
+    // undefined = early return (no messages / no trigger) — don't touch cursor
+    if (succeeded === undefined) return;
+    if (succeeded && !hadUnconsumedInput) {
+      lastAgentTimestamp[groupJid] = new Date().toISOString();
+      saveState();
+    }
+  });
 
   // Start core message processing (not channel-specific)
   startSchedulerLoop({
@@ -1329,6 +1351,8 @@ async function main(): Promise<void> {
     },
     sendMessage,
     assistantName: ASSISTANT_NAME,
+    registerIdleResetter: (groupJid, resetFn) => activeIdleTimerResetters.set(groupJid, resetFn),
+    unregisterIdleResetter: (groupJid) => activeIdleTimerResetters.delete(groupJid),
   });
   startIpcWatcher();
 

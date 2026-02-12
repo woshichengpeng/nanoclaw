@@ -29,6 +29,8 @@ export class GroupQueue {
   private activeCount = 0;
   private waitingGroups: string[] = [];
   private processMessagesFn: ((groupJid: string) => Promise<void>) | null = null;
+  private onMessagePipedFn: ((groupJid: string) => void) | null = null;
+  private onContainerDoneFn: ((groupJid: string, hadUnconsumedInput: boolean) => void) | null = null;
   private shuttingDown = false;
 
   private getGroup(groupJid: string): GroupState {
@@ -50,6 +52,14 @@ export class GroupQueue {
 
   setProcessMessagesFn(fn: (groupJid: string) => Promise<void>): void {
     this.processMessagesFn = fn;
+  }
+
+  setOnMessagePipedFn(fn: (groupJid: string) => void): void {
+    this.onMessagePipedFn = fn;
+  }
+
+  setOnContainerDoneFn(fn: (groupJid: string, hadUnconsumedInput: boolean) => void): void {
+    this.onContainerDoneFn = fn;
   }
 
   enqueueMessageCheck(groupJid: string): void {
@@ -133,8 +143,12 @@ export class GroupQueue {
       const filepath = path.join(inputDir, filename);
       const tempPath = `${filepath}.tmp`;
       fs.writeFileSync(tempPath, JSON.stringify({ prompt: text }));
+      // Remove close sentinel FIRST — before placing the new message atomically
+      const closeSentinel = path.join(inputDir, '_close');
+      try { fs.unlinkSync(closeSentinel); } catch {}
       fs.renameSync(tempPath, filepath);
       logger.debug({ groupJid, filename }, 'Piped message to active container');
+      if (this.onMessagePipedFn) this.onMessagePipedFn(groupJid);
       return true;
     } catch {
       return false;
@@ -180,11 +194,24 @@ export class GroupQueue {
       logger.error({ groupJid, err }, 'Error processing messages for group');
       this.scheduleRetry(groupJid, state);
     } finally {
+      const folder = state.groupFolder;
       state.active = false;
       state.process = null;
       state.containerName = null;
       state.groupFolder = null;
       this.activeCount--;
+
+      // Safety net: if IPC input files remain unconsumed, mark messages as pending
+      let hadUnconsumed = false;
+      if (folder) {
+        hadUnconsumed = this.checkUnconsumedInput(groupJid, folder);
+      }
+
+      // Notify host after cleanup — cursor advancement decisions happen here
+      if (this.onContainerDoneFn) {
+        this.onContainerDoneFn(groupJid, hadUnconsumed);
+      }
+
       this.drainGroup(groupJid);
     }
   }
@@ -204,11 +231,24 @@ export class GroupQueue {
     } catch (err) {
       logger.error({ groupJid, taskId: task.id, err }, 'Error running task');
     } finally {
+      const folder = state.groupFolder;
       state.active = false;
       state.process = null;
       state.containerName = null;
       state.groupFolder = null;
       this.activeCount--;
+
+      // Safety net: if IPC input files remain unconsumed, mark messages as pending
+      let hadUnconsumed = false;
+      if (folder) {
+        hadUnconsumed = this.checkUnconsumedInput(groupJid, folder);
+      }
+
+      // Notify host — clears any stale lastContainerResult from previous message runs
+      if (this.onContainerDoneFn) {
+        this.onContainerDoneFn(groupJid, hadUnconsumed);
+      }
+
       this.drainGroup(groupJid);
     }
   }
@@ -234,6 +274,54 @@ export class GroupQueue {
         this.enqueueMessageCheck(groupJid);
       }
     }, delayMs);
+  }
+
+  /**
+   * Check if IPC input files remain unconsumed after a container exits.
+   * If so, clean them up and mark messages as pending for reprocessing.
+   */
+  private checkUnconsumedInput(groupJid: string, groupFolder: string): boolean {
+    const inputDir = path.join(DATA_DIR, 'ipc', groupFolder, 'input');
+    try {
+      let allFiles: string[];
+      try {
+        allFiles = fs.readdirSync(inputDir);
+      } catch {
+        return false; // Directory doesn't exist
+      }
+
+      const jsonFiles = allFiles.filter(f => f.endsWith('.json'));
+      const tmpFiles = allFiles.filter(f => f.endsWith('.tmp'));
+
+      // Always clean up close sentinel
+      const closeSentinel = path.join(inputDir, '_close');
+      try { fs.unlinkSync(closeSentinel); } catch {}
+
+      // Clean up any orphaned .tmp files
+      for (const f of tmpFiles) {
+        try { fs.unlinkSync(path.join(inputDir, f)); } catch {}
+      }
+
+      if (jsonFiles.length > 0) {
+        logger.warn(
+          { groupJid, groupFolder, count: jsonFiles.length },
+          'Unconsumed IPC input files found after container exit, re-enqueuing',
+        );
+        // Clean up stale input files — these are duplicates of DB content;
+        // the reprocessed prompt will re-read from the DB using lastAgentTimestamp
+        for (const f of jsonFiles) {
+          try { fs.unlinkSync(path.join(inputDir, f)); } catch {}
+        }
+
+        // Mark messages as pending so drainGroup will reprocess
+        const state = this.getGroup(groupJid);
+        state.pendingMessages = true;
+        return true;
+      }
+    } catch (err) {
+      logger.debug({ groupJid, err }, 'Error checking unconsumed IPC input');
+    }
+    return false;
   }
 
   private drainGroup(groupJid: string): void {

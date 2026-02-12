@@ -26,6 +26,8 @@ export interface SchedulerDependencies {
   onProcess: (groupJid: string, proc: ChildProcess, containerName: string, groupFolder: string) => void;
   sendMessage: (jid: string, text: string) => Promise<void>;
   assistantName: string;
+  registerIdleResetter?: (groupJid: string, resetFn: () => void) => void;
+  unregisterIdleResetter?: (groupJid: string) => void;
 }
 
 function normalizeModelSpec(model?: string): string | undefined {
@@ -98,6 +100,9 @@ async function runTask(task: ScheduledTask, deps: SchedulerDependencies): Promis
   };
   resetIdleTimer();
 
+  // Register so piped messages can reset the idle timer during task execution
+  if (deps.registerIdleResetter) deps.registerIdleResetter(task.chat_jid, resetIdleTimer);
+
   try {
     const output = await runContainerAgent(group, {
       prompt: task.prompt,
@@ -127,9 +132,11 @@ async function runTask(task: ScheduledTask, deps: SchedulerDependencies): Promis
 
     logger.info({ taskId: task.id, durationMs: Date.now() - startTime }, 'Task completed');
   } catch (err) {
-    if (idleTimer) clearTimeout(idleTimer);
     error = err instanceof Error ? err.message : String(err);
     logger.error({ taskId: task.id, error }, 'Task failed');
+  } finally {
+    if (idleTimer) clearTimeout(idleTimer);
+    if (deps.unregisterIdleResetter) deps.unregisterIdleResetter(task.chat_jid);
   }
 
   const durationMs = Date.now() - startTime;
