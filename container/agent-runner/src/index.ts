@@ -317,7 +317,115 @@ function parseAgentResponse(text: string): AgentResponse | null {
     }
   }
 
+  // Fallback: try to fix malformed JSON (e.g. unescaped quotes in string values).
+  // Models sometimes produce JSON like:
+  //   {"outputType":"message","userMessage":"text with "quotes" inside"}
+  // where the inner quotes break JSON.parse. We escape them and retry.
+  for (const candidate of candidates) {
+    const fixed = fixMalformedAgentJson(candidate);
+    if (fixed) return fixed;
+  }
+
   return { outputType: 'message', userMessage: trimmed };
+}
+
+/**
+ * Attempt to fix and parse malformed JSON where string values contain unescaped
+ * double quotes. Strategy: find the value of userMessage/internalLog by locating
+ * the field key, then extract the raw content between known boundaries, escape
+ * the inner quotes, and parse the repaired JSON.
+ */
+function fixMalformedAgentJson(text: string): AgentResponse | null {
+  // Must have an outputType to be our expected schema
+  const outputTypeMatch = text.match(/"outputType"\s*:\s*"(message|log)"/);
+  if (!outputTypeMatch) return null;
+  const outputType = outputTypeMatch[1] as 'message' | 'log';
+
+  const userMessage = extractFieldFromMalformedJson(text, 'userMessage');
+  const internalLog = extractFieldFromMalformedJson(text, 'internalLog');
+
+  if (outputType === 'message' && userMessage) {
+    log('Recovered userMessage from malformed JSON (unescaped quotes in model output)');
+    return { outputType, userMessage, internalLog: internalLog || undefined };
+  }
+  if (outputType === 'message') {
+    // message with no userMessage → demote to log (matches main parser behavior)
+    return { outputType: 'log', internalLog: internalLog || undefined };
+  }
+  // outputType === 'log'
+  return { outputType, internalLog: internalLog || undefined };
+}
+
+/**
+ * Extract a string field from malformed JSON. Locates the field key pattern
+ * ("fieldName":"), then finds the value's end by searching backwards from
+ * known boundary patterns (next field key or closing brace).
+ */
+function extractFieldFromMalformedJson(json: string, fieldName: string): string | null {
+  // Find "fieldName" : " with flexible whitespace
+  const keyPattern = new RegExp(`"${fieldName}"\\s*:\\s*"`);
+  const keyMatch = keyPattern.exec(json);
+  if (!keyMatch) return null;
+  const valueStart = keyMatch.index + keyMatch[0].length;
+
+  // Determine where this field's value ends.
+  // We look for the LAST occurrence of `"` that is followed by either:
+  //   ,"<knownField>" (another field in the object)
+  //   }              (end of object — possibly with whitespace)
+  // We search from the end of the string backwards.
+  const knownFields = ['outputType', 'userMessage', 'internalLog'];
+  const endMarkers: number[] = [];
+
+  for (const field of knownFields) {
+    if (field === fieldName) continue;
+    // Look for , "fieldName" after our value start (with optional whitespace)
+    // Note: if the value itself contains this pattern, we may truncate early.
+    // This is an inherent limitation of parsing malformed JSON, but acceptable
+    // since this is already a fallback path for invalid model output.
+    const delimPattern = new RegExp(`,\\s*"${field}"`);
+    const delimMatch = delimPattern.exec(json.slice(valueStart));
+    if (delimMatch) {
+      const pos = valueStart + delimMatch.index;
+      // Pattern: ...value text here","nextField"...
+      // The closing quote of our value is just before the comma
+      if (pos > valueStart && json[pos - 1] === '"') {
+        endMarkers.push(pos - 1); // position of the closing quote
+      }
+    }
+  }
+
+  // Also check for "} at end of object
+  const lastBrace = json.lastIndexOf('}');
+  if (lastBrace > valueStart) {
+    // Walk back from } to find the closing "
+    let i = lastBrace - 1;
+    while (i > valueStart && (json[i] === ' ' || json[i] === '\n' || json[i] === '\r' || json[i] === '\t')) i--;
+    if (json[i] === '"') {
+      endMarkers.push(i);
+    }
+  }
+
+  if (endMarkers.length === 0) return null;
+
+  // Take the earliest end marker (smallest position) — this field ends before the next field starts
+  const valueEnd = Math.min(...endMarkers);
+  if (valueEnd <= valueStart) return null;
+
+  const rawValue = json.slice(valueStart, valueEnd);
+
+  // Unescape JSON escape sequences in a single pass to avoid double-processing.
+  // E.g., \\n in the raw value is a literal backslash-n pair (escaped backslash + n),
+  // not a newline. A sequential replace would incorrectly convert \\\\ → \\ then \\n → newline.
+  return rawValue.replace(/\\([\\"ntr])/g, (_match, ch) => {
+    switch (ch) {
+      case '\\': return '\\';
+      case '"': return '"';
+      case 'n': return '\n';
+      case 't': return '\t';
+      case 'r': return '\r';
+      default: return ch;
+    }
+  });
 }
 
 // ── Session setup ───────────────────────────────────────────────────
