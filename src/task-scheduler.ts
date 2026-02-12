@@ -13,6 +13,7 @@ import {
   DEFAULT_MODEL,
   getModelOverride,
   getThinkingLevelOverride,
+  IDLE_TIMEOUT,
 } from './config.js';
 import { runContainerAgent, writeTasksSnapshot } from './container-runner.js';
 import { GroupQueue } from './group-queue.js';
@@ -90,9 +91,14 @@ async function runTask(task: ScheduledTask, deps: SchedulerDependencies): Promis
     ? getSession(sessions, task.chat_jid)
     : undefined;
 
+  let idleTimer: ReturnType<typeof setTimeout> | null = null;
+  const resetIdleTimer = () => {
+    if (idleTimer) clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => deps.queue.closeStdin(task.chat_jid), IDLE_TIMEOUT);
+  };
+  resetIdleTimer();
+
   try {
-    // Non-streaming: container runs to completion and exits.
-    // send_message IPC files are picked up by the host IPC watcher.
     const output = await runContainerAgent(group, {
       prompt: task.prompt,
       sessionId,
@@ -103,15 +109,25 @@ async function runTask(task: ScheduledTask, deps: SchedulerDependencies): Promis
       model,
       thinkingLevel
     },
-    (proc, name) => deps.onProcess(task.chat_jid, proc, name, task.group_folder));
+    (proc, name) => deps.onProcess(task.chat_jid, proc, name, task.group_folder),
+    async (streamedOutput) => {
+      if (streamedOutput.result?.outputType === 'message' && streamedOutput.result?.userMessage) {
+        await deps.sendMessage(task.chat_jid, `${deps.assistantName}: ${streamedOutput.result.userMessage}`);
+      }
+      if (streamedOutput.result) resetIdleTimer();
+    });
+
+    if (idleTimer) clearTimeout(idleTimer);
 
     if (output.status === 'error') {
       error = output.error || 'Unknown error';
     }
-    result = output.result?.userMessage || 'Completed';
+    // Results were already sent via streaming callback, just log
+    result = 'Streamed';
 
     logger.info({ taskId: task.id, durationMs: Date.now() - startTime }, 'Task completed');
   } catch (err) {
+    if (idleTimer) clearTimeout(idleTimer);
     error = err instanceof Error ? err.message : String(err);
     logger.error({ taskId: task.id, error }, 'Task failed');
   }
