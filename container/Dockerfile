@@ -29,6 +29,9 @@ RUN apt-get update && apt-get install -y \
 ENV TZ=Asia/Shanghai
 RUN ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime && echo "Asia/Shanghai" > /etc/timezone
 
+# Prefer IPv4 DNS results — our NAT only handles IPv4, so IPv6-first lookups fail
+ENV NODE_OPTIONS=--dns-result-order=ipv4first
+
 # Set Chromium path for agent-browser
 ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
 ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
