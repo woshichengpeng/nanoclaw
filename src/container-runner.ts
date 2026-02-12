@@ -280,6 +280,16 @@ export async function runContainerAgent(
   const logsDir = path.join(GROUPS_DIR, group.folder, 'logs');
   fs.mkdirSync(logsDir, { recursive: true });
 
+  // Clean stale IPC input files (especially _close sentinel from previous runs)
+  const ipcInputDir = path.join(DATA_DIR, 'ipc', group.folder, 'input');
+  try {
+    if (fs.existsSync(ipcInputDir)) {
+      for (const file of fs.readdirSync(ipcInputDir)) {
+        try { fs.unlinkSync(path.join(ipcInputDir, file)); } catch {}
+      }
+    }
+  } catch {}
+
   const defaultTimeout = input.isScheduledTask ? TASK_CONTAINER_TIMEOUT : CONTAINER_TIMEOUT;
   const timeoutMs = group.containerConfig?.timeout || defaultTimeout;
 
