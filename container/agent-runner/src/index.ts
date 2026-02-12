@@ -456,6 +456,10 @@ function subscribeSessionHooks(session: AgentSession, sessionManager: SessionMan
 
 // ── Query runner ────────────────────────────────────────────────────
 
+// If no SDK events arrive within this window, assume the API call is hung.
+const API_STALL_TIMEOUT_MS = 3 * 60 * 1000; // 3 minutes
+const MAX_STALL_RETRIES = 2;
+
 async function runQuery(
   session: AgentSession,
   sessionManager: SessionManager,
@@ -463,8 +467,25 @@ async function runQuery(
 ): Promise<{ newSessionId?: string; closedDuringQuery: boolean }> {
   let closedDuringQuery = false;
   let lastAssistant: Message | undefined;
+  let stallDetected = false;
+  let stallRetries = 0;
+
+  // Inactivity watchdog: abort if no SDK events for API_STALL_TIMEOUT_MS
+  let stallTimer: ReturnType<typeof setTimeout> | null = null;
+  const resetStallTimer = () => {
+    if (stallTimer) clearTimeout(stallTimer);
+    stallTimer = setTimeout(() => {
+      stallDetected = true;
+      stallRetries++;
+      log(`No SDK activity for ${API_STALL_TIMEOUT_MS / 1000}s, aborting (stall ${stallRetries}/${MAX_STALL_RETRIES})`);
+      session.abort().catch(() => undefined);
+    }, API_STALL_TIMEOUT_MS);
+  };
+  resetStallTimer();
 
   const unsubscribe = session.subscribe((event: AgentSessionEvent) => {
+    // Any event = API is alive, reset watchdog
+    resetStallTimer();
     if (event.type === 'turn_end') {
       lastAssistant = event.message as Message;
     }
@@ -479,7 +500,18 @@ async function runQuery(
   }, IPC_POLL_MS);
 
   try {
-    await session.prompt(prompt);
+    // Retry loop for API stalls
+    while (true) {
+      stallDetected = false;
+      await session.prompt(prompt);
+
+      if (stallDetected && stallRetries < MAX_STALL_RETRIES) {
+        log(`API stall detected, retrying (${stallRetries}/${MAX_STALL_RETRIES})...`);
+        resetStallTimer();
+        continue;
+      }
+      break;
+    }
 
     const text = lastAssistant ? extractMessageText(lastAssistant) : '';
     const result = parseAgentResponse(text);
@@ -491,6 +523,7 @@ async function runQuery(
       });
     }
   } finally {
+    if (stallTimer) clearTimeout(stallTimer);
     clearInterval(pollHandle);
     unsubscribe();
   }
