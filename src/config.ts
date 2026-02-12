@@ -19,6 +19,7 @@ export const MAIN_GROUP_FOLDER = 'main';
 export const DEFAULT_MODEL = (process.env.NANOCLAW_DEFAULT_MODEL || process.env.PI_DEFAULT_MODEL || '').trim();
 export const CONTAINER_IMAGE = process.env.CONTAINER_IMAGE || 'nanoclaw-agent:latest';
 export const CONTAINER_TIMEOUT = parseInt(process.env.CONTAINER_TIMEOUT || '1800000', 10); // 30min default for streaming
+export const TASK_CONTAINER_TIMEOUT = parseInt(process.env.TASK_CONTAINER_TIMEOUT || '300000', 10); // 5min for scheduled tasks
 export const IDLE_TIMEOUT = parseInt(process.env.IDLE_TIMEOUT || '1800000', 10); // 30min idle before closing container
 export const MAX_CONCURRENT_CONTAINERS = Math.max(1, parseInt(process.env.MAX_CONCURRENT_CONTAINERS || '5', 10));
 export const CONTAINER_MAX_OUTPUT_SIZE = parseInt(process.env.CONTAINER_MAX_OUTPUT_SIZE || '10485760', 10); // 10MB default

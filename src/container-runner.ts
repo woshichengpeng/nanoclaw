@@ -11,6 +11,7 @@ import {
   CONTAINER_IMAGE,
   DEFAULT_MODEL,
   CONTAINER_TIMEOUT,
+  TASK_CONTAINER_TIMEOUT,
   CONTAINER_MAX_OUTPUT_SIZE,
   GROUPS_DIR,
   DATA_DIR,
@@ -279,7 +280,8 @@ export async function runContainerAgent(
   const logsDir = path.join(GROUPS_DIR, group.folder, 'logs');
   fs.mkdirSync(logsDir, { recursive: true });
 
-  const timeoutMs = group.containerConfig?.timeout || CONTAINER_TIMEOUT;
+  const defaultTimeout = input.isScheduledTask ? TASK_CONTAINER_TIMEOUT : CONTAINER_TIMEOUT;
+  const timeoutMs = group.containerConfig?.timeout || defaultTimeout;
 
   return new Promise((resolve) => {
     const container = spawn('container', containerArgs, {
