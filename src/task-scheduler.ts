@@ -25,6 +25,7 @@ export interface SchedulerDependencies {
   queue: GroupQueue;
   onProcess: (groupJid: string, proc: ChildProcess, containerName: string, groupFolder: string) => void;
   sendMessage: (jid: string, text: string) => Promise<void>;
+  processIpcMessages: (groupFolder: string, isMain: boolean) => Promise<string[]>;
   assistantName: string;
   registerIdleResetter?: (groupJid: string, resetFn: () => void) => void;
   unregisterIdleResetter?: (groupJid: string) => void;
@@ -116,6 +117,9 @@ async function runTask(task: ScheduledTask, deps: SchedulerDependencies): Promis
     },
     (proc, name) => deps.onProcess(task.chat_jid, proc, name, task.group_folder),
     async (streamedOutput) => {
+      // Process IPC messages inline during streaming (send_message tool calls)
+      await deps.processIpcMessages(task.group_folder, isMain);
+
       if (streamedOutput.result?.outputType === 'message' && streamedOutput.result?.userMessage) {
         await deps.sendMessage(task.chat_jid, `${deps.assistantName}: ${streamedOutput.result.userMessage}`);
       }
@@ -123,6 +127,9 @@ async function runTask(task: ScheduledTask, deps: SchedulerDependencies): Promis
     });
 
     if (idleTimer) clearTimeout(idleTimer);
+
+    // Process any remaining IPC messages after container completes
+    await deps.processIpcMessages(task.group_folder, isMain);
 
     if (output.status === 'error') {
       error = output.error || 'Unknown error';

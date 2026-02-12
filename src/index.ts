@@ -787,9 +787,15 @@ async function sendFile(
 }
 
 /**
- * Process IPC messages for a specific group immediately after agent run.
+ * Process IPC messages for a specific group. Idempotent (read → send → delete).
  * Returns list of chatJids that received messages.
- * This ensures send_message tool calls are processed before result is sent.
+ *
+ * Called inline during agent streaming callbacks AND after container completion
+ * for low-latency delivery. Also polled by the IPC watcher as a safety net.
+ *
+ * ⚠️ When adding new code paths that run containers, call this function
+ * in both the streaming callback and after completion. See task-scheduler.ts
+ * for the pattern, and commit 3dc6d5a for what happens when you forget.
  */
 async function processGroupIpcMessages(groupFolder: string, isMain: boolean): Promise<string[]> {
   const sentToChats: string[] = [];
@@ -874,7 +880,9 @@ function startIpcWatcher(): void {
       const isMain = sourceGroup === MAIN_GROUP_FOLDER;
       const tasksDir = path.join(ipcBaseDir, sourceGroup, 'tasks');
 
-      // IPC message files are handled inline after agent runs to preserve send_message precedence.
+      // IPC message files are handled inline during agent runs for low-latency delivery.
+      // Do NOT process them here — missing inline calls should fail loudly, not be silently masked.
+
       // Process tasks from this group's IPC directory
       try {
         if (fs.existsSync(tasksDir)) {
@@ -1375,6 +1383,7 @@ async function main(): Promise<void> {
       queue.registerProcess(groupJid, proc, containerName, groupFolder);
     },
     sendMessage,
+    processIpcMessages: processGroupIpcMessages,
     assistantName: ASSISTANT_NAME,
     registerIdleResetter: (groupJid, resetFn) => activeIdleTimerResetters.set(groupJid, resetFn),
     unregisterIdleResetter: (groupJid) => activeIdleTimerResetters.delete(groupJid),
