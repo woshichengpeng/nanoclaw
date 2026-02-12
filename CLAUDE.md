@@ -41,3 +41,7 @@ Service management:
 launchctl load ~/Library/LaunchAgents/com.nanoclaw.plist
 launchctl unload ~/Library/LaunchAgents/com.nanoclaw.plist
 ```
+
+## Models
+
+Run `pi --list-models` to see available models. The model override lives in `data/model_override.json`.
