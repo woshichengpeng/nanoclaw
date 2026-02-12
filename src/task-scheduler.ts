@@ -160,6 +160,9 @@ async function runTask(task: ScheduledTask, deps: SchedulerDependencies): Promis
 export function startSchedulerLoop(deps: SchedulerDependencies): void {
   logger.info('Scheduler loop started');
 
+  // Track tasks that are already enqueued or running to avoid duplicate execution
+  const inflightTasks = new Set<string>();
+
   const loop = async () => {
     try {
       const dueTasks = getDueTasks();
@@ -168,13 +171,27 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
       }
 
       for (const task of dueTasks) {
+        // Skip tasks already enqueued or running
+        if (inflightTasks.has(task.id)) {
+          logger.debug({ taskId: task.id }, 'Task already in-flight, skipping');
+          continue;
+        }
+
         // Re-check task status in case it was paused/cancelled
         const currentTask = getTaskById(task.id);
         if (!currentTask || currentTask.status !== 'active') {
           continue;
         }
 
-        deps.queue.enqueueTask(currentTask.chat_jid, currentTask.id, () => runTask(currentTask, deps));
+        inflightTasks.add(currentTask.id);
+        const taskId = currentTask.id;
+        deps.queue.enqueueTask(currentTask.chat_jid, currentTask.id, async () => {
+          try {
+            await runTask(currentTask, deps);
+          } finally {
+            inflightTasks.delete(taskId);
+          }
+        });
       }
     } catch (err) {
       logger.error({ err }, 'Error in scheduler loop');
