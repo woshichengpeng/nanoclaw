@@ -566,6 +566,7 @@ async function processGroupMessages(chatJid: string): Promise<void> {
   // Set up idle timer to close container after inactivity
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
   let outputSentToUser = false;
+  let agentProducedOutput = false;
   const resetIdleTimer = () => {
     if (idleTimer) clearTimeout(idleTimer);
     idleTimer = setTimeout(() => queue.closeStdin(chatJid), IDLE_TIMEOUT);
@@ -587,6 +588,7 @@ async function processGroupMessages(chatJid: string): Promise<void> {
       }
 
       if (streamedOutput.result?.internalLog) {
+        agentProducedOutput = true;
         logger.info(
           { group: group.name, outputType: streamedOutput.result.outputType },
           `Agent: ${streamedOutput.result.internalLog}`,
@@ -594,13 +596,29 @@ async function processGroupMessages(chatJid: string): Promise<void> {
       }
 
       // Reset idle timer on output
-      if (streamedOutput.result) resetIdleTimer();
+      if (streamedOutput.result) {
+        agentProducedOutput = true;
+        resetIdleTimer();
+      }
     });
 
     if (idleTimer) clearTimeout(idleTimer);
 
     // Process any remaining IPC messages
     await processGroupIpcMessages(group.folder, isMainGroup);
+
+    // Detect silent failure: container succeeded but produced no output at all.
+    // This typically happens when the session is too large and the model
+    // aborts internally (e.g. GitHub Copilot silently aborting at context limits).
+    // Auto-clear the session so the next message starts fresh.
+    if (result === 'success' && !agentProducedOutput) {
+      if (sessions[chatJid]) {
+        logger.warn({ group: group.name, chatJid }, 'Container returned success but no output was produced — session may be too large, auto-clearing');
+        delete sessions[chatJid];
+        saveJson(path.join(DATA_DIR, 'sessions.json'), sessions);
+        await sendMessage(chatJid, '⚠️ No response was received. Session has been auto-cleared — please resend your message.');
+      }
+    }
 
     // Store result for onContainerDone callback to decide cursor advancement.
     // If we already sent output to the user, treat as success even on error —
