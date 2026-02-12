@@ -13,6 +13,7 @@ import {
   CONTAINER_TIMEOUT,
   TASK_CONTAINER_TIMEOUT,
   CONTAINER_MAX_OUTPUT_SIZE,
+  IDLE_TIMEOUT,
   GROUPS_DIR,
   DATA_DIR,
   getModelOverride,
@@ -291,7 +292,6 @@ export async function runContainerAgent(
   } catch {}
 
   const defaultTimeout = input.isScheduledTask ? TASK_CONTAINER_TIMEOUT : CONTAINER_TIMEOUT;
-  const timeoutMs = group.containerConfig?.timeout || defaultTimeout;
 
   return new Promise((resolve) => {
     const container = spawn('container', containerArgs, {
@@ -307,6 +307,7 @@ export async function runContainerAgent(
     let stderrTruncated = false;
     let stderrTail = '';
     let newSessionId: string | undefined;
+    let hadStreamingOutput = false;
 
     // For streaming mode: chain output callbacks to preserve order
     let outputChain = Promise.resolve();
@@ -345,6 +346,7 @@ export async function runContainerAgent(
           try {
             const parsed: ContainerOutput = JSON.parse(jsonStr);
             if (parsed.newSessionId) newSessionId = parsed.newSessionId;
+            hadStreamingOutput = true;
             resetTimeout(); // Activity-aware: reset on output
             outputChain = outputChain.then(() => effectiveOnOutput(parsed));
           } catch (err) {
@@ -384,6 +386,12 @@ export async function runContainerAgent(
     });
 
     let timedOut = false;
+    const configTimeout = group.containerConfig?.timeout || defaultTimeout;
+    // Grace period: hard timeout must be at least IDLE_TIMEOUT + 30s so the
+    // graceful _close sentinel has time to trigger before the hard kill fires.
+    // With defaults (CONTAINER_TIMEOUT=30min, IDLE_TIMEOUT=30s), configTimeout always wins;
+    // this guard protects against misconfigured low timeouts.
+    const timeoutMs = Math.max(configTimeout, IDLE_TIMEOUT + 30_000);
 
     // Activity-aware timeout: resets when OUTPUT markers are parsed
     let timeout = setTimeout(killOnTimeout, timeoutMs);
@@ -418,6 +426,7 @@ export async function runContainerAgent(
           `Container: ${containerName}`,
           `Duration: ${duration}ms`,
           `Exit Code: ${code}`,
+          `Had Streaming Output: ${hadStreamingOutput}`,
           ``,
           stderrTailLabel,
           stderrTail,
@@ -426,15 +435,36 @@ export async function runContainerAgent(
           stdoutTail,
         ].join('\n'));
 
+        // Timeout after output = idle cleanup, not failure.
+        // The agent already sent its response; this is just the
+        // container being reaped after the idle period expired.
+        if (hadStreamingOutput) {
+          logger.info(
+            { group: group.name, containerName, duration, code },
+            'Container timed out after output (idle cleanup)',
+          );
+          outputChain.then(() => {
+            resolve({
+              status: 'success',
+              result: null,
+              newSessionId,
+            });
+          }).catch((err) => {
+            logger.error({ group: group.name, err }, 'Output chain failed during idle cleanup');
+            resolve({ status: 'error', result: null, error: String(err) });
+          });
+          return;
+        }
+
         logger.error(
           { group: group.name, containerName, duration, code },
-          'Container timed out',
+          'Container timed out with no output',
         );
 
         resolve({
           status: 'error',
           result: null,
-          error: `Container timed out after ${timeoutMs}ms`,
+          error: `Container timed out after ${configTimeout}ms (effective timeout: ${timeoutMs}ms)`,
         });
         return;
       }

@@ -2,22 +2,12 @@
 # All commits up to and including this hash have been reviewed.
 # Next merge: git fetch upstream && git log --oneline upstream/main --not <hash>
 #
-# Reviewed on: 2026-02-10
+# Reviewed on: 2026-02-12
+# Merged (cherry-pick):
+#   a354997 - Apple Container Networking Setup documentation
 # Merged (manual apply):
-#   ae17715 - structured agent output (outputFormat, AgentResponse, exponential backoff concept)
-#   44f0b3d - outputType rename, tool descriptions, target_group_jid, global CLAUDE.md injection, task scheduler userMessage
-#   8dd27bc - defend against missing structured output
-#   675ed30 - improve container error logging (full stdout/stderr on error)
-#   f26468c - requiresTrigger, agent-browser visibility (partial - skip setup skill WhatsApp changes)
-#   b2bd141 - fix orphan container cleanup (container ls --format json instead of {{.Names}})
-#   b3f5814 - native Claude memory management (env vars + CLAUDE.md wording)
+#   8eb80d4 - prevent infinite message replay on container timeout
 # Skipped:
-#   eac9a6a - superseded by ae17715 squash merge
-#   03df69e - superseded by ae17715 squash merge
-#   2ecda36 - trivial CLAUDE.md wording tweak, covered by 44f0b3d
-#   6cd165f - add-telegram skill (we already have Telegram natively)
-#   6f02ee5 - Agent Swarms (massive rewrite, incompatible architecture)
-#   126b3f4 - Telegram swarm skill (depends on swarm architecture)
-#   116fba1 - README Discord badge cache bust (cosmetic)
-#   196abf6 - Telegram skill swarm docs update (not relevant)
-196abf6
+#   2b56fec - massive index.ts refactor (channel abstraction, IPC, router extraction) — incompatible architecture
+#   4647353 - add /groups/ and /launchd/ to CODEOWNERS — upstream-specific
+a354997

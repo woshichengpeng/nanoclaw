@@ -565,6 +565,7 @@ async function processGroupMessages(chatJid: string): Promise<void> {
 
   // Set up idle timer to close container after inactivity
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
+  let outputSentToUser = false;
   const resetIdleTimer = () => {
     if (idleTimer) clearTimeout(idleTimer);
     idleTimer = setTimeout(() => queue.closeStdin(chatJid), IDLE_TIMEOUT);
@@ -582,6 +583,7 @@ async function processGroupMessages(chatJid: string): Promise<void> {
       // Send streamed results to user
       if (streamedOutput.result?.outputType === 'message' && streamedOutput.result?.userMessage) {
         await sendMessage(chatJid, streamedOutput.result.userMessage);
+        outputSentToUser = true;
       }
 
       if (streamedOutput.result?.internalLog) {
@@ -600,8 +602,13 @@ async function processGroupMessages(chatJid: string): Promise<void> {
     // Process any remaining IPC messages
     await processGroupIpcMessages(group.folder, isMainGroup);
 
-    // Store result for onContainerDone callback to decide cursor advancement
-    lastContainerResult.set(chatJid, result !== 'error');
+    // Store result for onContainerDone callback to decide cursor advancement.
+    // If we already sent output to the user, treat as success even on error —
+    // rolling back the cursor would cause infinite message replay (duplicates).
+    if (result === 'error' && outputSentToUser) {
+      logger.warn({ group: group.name }, 'Agent error after output was sent, treating as success to prevent cursor rollback');
+    }
+    lastContainerResult.set(chatJid, result !== 'error' || outputSentToUser);
   } finally {
     activeIdleTimerResetters.delete(chatJid);
     clearInterval(typingInterval);
