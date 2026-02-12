@@ -58,10 +58,6 @@ export class GroupQueue {
     state.pendingTasks.push({ taskId, fn });
     if (!state.active) {
       this.scheduleGroup(chatJid);
-    } else {
-      // Close the active streaming container so the task can run
-      logger.info({ chatJid, taskId }, 'Closing active container to run pending task');
-      this.closeStdin(chatJid);
     }
   }
 
