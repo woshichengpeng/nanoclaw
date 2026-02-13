@@ -579,7 +579,12 @@ async function processGroupMessages(chatJid: string): Promise<void> {
   try {
     const result = await runAgent(group, prompt, chatJid, async (streamedOutput) => {
       // Process IPC messages inline during streaming
-      await processGroupIpcMessages(group.folder, isMainGroup);
+      const inlineIpcSent = await processGroupIpcMessages(group.folder, isMainGroup);
+      if (inlineIpcSent.length > 0) {
+        agentProducedOutput = true;
+        if (inlineIpcSent.includes(chatJid)) outputSentToUser = true;
+        resetIdleTimer();
+      }
 
       // Send streamed results to user
       if (streamedOutput.result?.outputType === 'message' && streamedOutput.result?.userMessage) {
@@ -600,12 +605,16 @@ async function processGroupMessages(chatJid: string): Promise<void> {
         agentProducedOutput = true;
         resetIdleTimer();
       }
-    });
+    }, resetIdleTimer);
 
     if (idleTimer) clearTimeout(idleTimer);
 
     // Process any remaining IPC messages
-    await processGroupIpcMessages(group.folder, isMainGroup);
+    const finalIpcSent = await processGroupIpcMessages(group.folder, isMainGroup);
+    if (finalIpcSent.length > 0) {
+      agentProducedOutput = true;
+      if (finalIpcSent.includes(chatJid)) outputSentToUser = true;
+    }
 
     // Detect silent failure: container succeeded but produced no output at all.
     // This typically happens when the session is too large and the model
@@ -638,7 +647,8 @@ async function runAgent(
   group: RegisteredGroup,
   prompt: string,
   chatJid: string,
-  onOutput?: (output: ContainerOutput) => Promise<void>
+  onOutput?: (output: ContainerOutput) => Promise<void>,
+  onActivity?: () => void,
 ): Promise<'success' | 'error'> {
   const isMain = group.folder === MAIN_GROUP_FOLDER;
   const model = getGroupModel(group);
@@ -685,7 +695,8 @@ async function runAgent(
     (proc, containerName) => {
       queue.registerProcess(chatJid, proc, containerName, group.folder);
     },
-    wrappedOnOutput);
+    wrappedOnOutput,
+    onActivity);
 
     // For non-streaming runs, session ID comes in final output
     if (output.newSessionId) {
@@ -939,6 +950,9 @@ async function processTaskIpc(
   const { createTask, updateTask, deleteTask, getTaskById: getTask } = await import('./db.js');
   const { CronExpressionParser } = await import('cron-parser');
 
+  // Normalize task ID: agents sometimes strip the 'task-' prefix
+  const taskId = data.taskId && !data.taskId.startsWith('task-') ? `task-${data.taskId}` : data.taskId;
+
   switch (data.type) {
     case 'schedule_task':
       if (data.prompt && data.schedule_type && data.schedule_value && (data.targetJid || data.groupFolder)) {
@@ -998,12 +1012,12 @@ async function processTaskIpc(
           nextRun = scheduled.toISOString();
         }
 
-        const taskId = `task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        const newTaskId = `task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
         const contextMode = (data.context_mode === 'group' || data.context_mode === 'isolated')
           ? data.context_mode
           : 'isolated';
         createTask({
-          id: taskId,
+          id: newTaskId,
           group_folder: targetGroup,
           chat_jid: targetJid,
           prompt: data.prompt,
@@ -1014,42 +1028,48 @@ async function processTaskIpc(
           status: 'active',
           created_at: new Date().toISOString()
         });
-        logger.info({ taskId, sourceGroup, targetGroup, contextMode }, 'Task created via IPC');
+        logger.info({ taskId: newTaskId, sourceGroup, targetGroup, contextMode }, 'Task created via IPC');
       }
       break;
 
     case 'pause_task':
-      if (data.taskId) {
-        const task = getTask(data.taskId);
-        if (task && (isMain || task.group_folder === sourceGroup)) {
-          updateTask(data.taskId, { status: 'paused' });
-          logger.info({ taskId: data.taskId, sourceGroup }, 'Task paused via IPC');
+      if (taskId) {
+        const task = getTask(taskId);
+        if (!task) {
+          logger.warn({ taskId, rawTaskId: data.taskId, sourceGroup }, 'Task not found for pause');
+        } else if (isMain || task.group_folder === sourceGroup) {
+          updateTask(task.id, { status: 'paused' });
+          logger.info({ taskId: task.id, sourceGroup }, 'Task paused via IPC');
         } else {
-          logger.warn({ taskId: data.taskId, sourceGroup }, 'Unauthorized task pause attempt');
+          logger.warn({ taskId: task.id, sourceGroup }, 'Unauthorized task pause attempt');
         }
       }
       break;
 
     case 'resume_task':
-      if (data.taskId) {
-        const task = getTask(data.taskId);
-        if (task && (isMain || task.group_folder === sourceGroup)) {
-          updateTask(data.taskId, { status: 'active' });
-          logger.info({ taskId: data.taskId, sourceGroup }, 'Task resumed via IPC');
+      if (taskId) {
+        const task = getTask(taskId);
+        if (!task) {
+          logger.warn({ taskId, rawTaskId: data.taskId, sourceGroup }, 'Task not found for resume');
+        } else if (isMain || task.group_folder === sourceGroup) {
+          updateTask(task.id, { status: 'active' });
+          logger.info({ taskId: task.id, sourceGroup }, 'Task resumed via IPC');
         } else {
-          logger.warn({ taskId: data.taskId, sourceGroup }, 'Unauthorized task resume attempt');
+          logger.warn({ taskId: task.id, sourceGroup }, 'Unauthorized task resume attempt');
         }
       }
       break;
 
     case 'cancel_task':
-      if (data.taskId) {
-        const task = getTask(data.taskId);
-        if (task && (isMain || task.group_folder === sourceGroup)) {
-          deleteTask(data.taskId);
-          logger.info({ taskId: data.taskId, sourceGroup }, 'Task cancelled via IPC');
+      if (taskId) {
+        const task = getTask(taskId);
+        if (!task) {
+          logger.warn({ taskId, rawTaskId: data.taskId, sourceGroup }, 'Task not found for cancel');
+        } else if (isMain || task.group_folder === sourceGroup) {
+          deleteTask(task.id);
+          logger.info({ taskId: task.id, sourceGroup }, 'Task cancelled via IPC');
         } else {
-          logger.warn({ taskId: data.taskId, sourceGroup }, 'Unauthorized task cancel attempt');
+          logger.warn({ taskId: task.id, sourceGroup }, 'Unauthorized task cancel attempt');
         }
       }
       break;

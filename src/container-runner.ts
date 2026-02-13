@@ -239,6 +239,7 @@ export async function runContainerAgent(
   input: ContainerInput,
   onProcess?: (proc: ChildProcess, containerName: string) => void,
   onOutput?: (output: ContainerOutput) => Promise<void>,
+  onActivity?: () => void,
 ): Promise<ContainerOutput> {
   const startTime = Date.now();
 
@@ -325,9 +326,17 @@ export async function runContainerAgent(
     container.stdin.write(JSON.stringify(resolvedInput));
     container.stdin.end();
 
+    // Throttle onActivity to at most once per second to reduce timer churn
+    let lastActivityTime = 0;
+    const throttledOnActivity = onActivity ? () => {
+      const now = Date.now();
+      if (now - lastActivityTime > 1000) { lastActivityTime = now; onActivity(); }
+    } : undefined;
+
     container.stdout.on('data', (data) => {
       const chunk = data.toString();
       stdoutTail = appendTail(stdoutTail, chunk, ERROR_LOG_TAIL_SIZE);
+      if (throttledOnActivity) throttledOnActivity();
 
       if (effectiveOnOutput) {
         // Streaming mode: parse OUTPUT markers in real time

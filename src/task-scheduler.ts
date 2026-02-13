@@ -124,7 +124,8 @@ async function runTask(task: ScheduledTask, deps: SchedulerDependencies): Promis
         await deps.sendMessage(task.chat_jid, `${deps.assistantName}: ${streamedOutput.result.userMessage}`);
       }
       if (streamedOutput.result) resetIdleTimer();
-    });
+    },
+    resetIdleTimer);
 
     if (idleTimer) clearTimeout(idleTimer);
 
