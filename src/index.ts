@@ -564,26 +564,51 @@ async function processGroupMessages(chatJid: string): Promise<void> {
   }, 4000);
 
   // Set up idle timer to close container after inactivity
+  // Only starts AFTER first output is received — during the initial query,
+  // the container timeout (CONTAINER_TIMEOUT) is the safety net instead.
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
   let outputSentToUser = false;
   let agentProducedOutput = false;
+  let firstOutputReceived = false;
   const resetIdleTimer = () => {
     if (idleTimer) clearTimeout(idleTimer);
-    idleTimer = setTimeout(() => queue.closeStdin(chatJid), IDLE_TIMEOUT);
+    idleTimer = setTimeout(() => {
+      logger.info({ group: group.name, chatJid, idleTimeout: IDLE_TIMEOUT }, 'Idle timeout reached, closing container stdin');
+      queue.closeStdin(chatJid);
+    }, IDLE_TIMEOUT);
   };
-  resetIdleTimer();
+  const startIdleTimerIfNeeded = () => {
+    if (!firstOutputReceived) {
+      firstOutputReceived = true;
+      logger.debug({ group: group.name }, 'First output received, starting idle timer');
+    }
+    resetIdleTimer();
+  };
 
   // Register so piped messages can reset the idle timer
-  activeIdleTimerResetters.set(chatJid, resetIdleTimer);
+  activeIdleTimerResetters.set(chatJid, startIdleTimerIfNeeded);
 
   try {
     const result = await runAgent(group, prompt, chatJid, async (streamedOutput) => {
+      // Log every streamed output for debugging
+      logger.debug({
+        group: group.name,
+        status: streamedOutput.status,
+        hasResult: !!streamedOutput.result,
+        outputType: streamedOutput.result?.outputType,
+        hasUserMessage: !!streamedOutput.result?.userMessage,
+        userMessageLen: streamedOutput.result?.userMessage?.length,
+        hasLog: !!streamedOutput.result?.internalLog,
+        newSessionId: streamedOutput.newSessionId ? '(set)' : '(none)',
+        error: streamedOutput.error,
+      }, 'Streamed output received');
+
       // Process IPC messages inline during streaming
       const inlineIpcSent = await processGroupIpcMessages(group.folder, isMainGroup);
       if (inlineIpcSent.length > 0) {
         agentProducedOutput = true;
         if (inlineIpcSent.includes(chatJid)) outputSentToUser = true;
-        resetIdleTimer();
+        startIdleTimerIfNeeded();
       }
 
       // Send streamed results to user
@@ -603,9 +628,9 @@ async function processGroupMessages(chatJid: string): Promise<void> {
       // Reset idle timer on output
       if (streamedOutput.result) {
         agentProducedOutput = true;
-        resetIdleTimer();
+        startIdleTimerIfNeeded();
       }
-    }, resetIdleTimer);
+    }, startIdleTimerIfNeeded);
 
     if (idleTimer) clearTimeout(idleTimer);
 

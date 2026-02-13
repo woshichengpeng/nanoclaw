@@ -95,14 +95,18 @@ async function runTask(task: ScheduledTask, deps: SchedulerDependencies): Promis
     : undefined;
 
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
+  let firstOutputReceived = false;
   const resetIdleTimer = () => {
     if (idleTimer) clearTimeout(idleTimer);
     idleTimer = setTimeout(() => deps.queue.closeStdin(task.chat_jid), IDLE_TIMEOUT);
   };
-  resetIdleTimer();
+  const startIdleTimerIfNeeded = () => {
+    if (!firstOutputReceived) firstOutputReceived = true;
+    resetIdleTimer();
+  };
 
   // Register so piped messages can reset the idle timer during task execution
-  if (deps.registerIdleResetter) deps.registerIdleResetter(task.chat_jid, resetIdleTimer);
+  if (deps.registerIdleResetter) deps.registerIdleResetter(task.chat_jid, startIdleTimerIfNeeded);
 
   try {
     const output = await runContainerAgent(group, {
@@ -123,9 +127,9 @@ async function runTask(task: ScheduledTask, deps: SchedulerDependencies): Promis
       if (streamedOutput.result?.outputType === 'message' && streamedOutput.result?.userMessage) {
         await deps.sendMessage(task.chat_jid, `${deps.assistantName}: ${streamedOutput.result.userMessage}`);
       }
-      if (streamedOutput.result) resetIdleTimer();
+      if (streamedOutput.result) startIdleTimerIfNeeded();
     },
-    resetIdleTimer);
+    startIdleTimerIfNeeded);
 
     if (idleTimer) clearTimeout(idleTimer);
 

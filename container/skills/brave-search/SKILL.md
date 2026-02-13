@@ -40,6 +40,8 @@ Requires a Brave Search API account with a free subscription. A credit card is r
 
 - `-n <num>` - Number of results (default: 5, max: 20)
 - `--content` - Fetch and include page content as markdown
+- `--max-content <chars>` - Max chars per page content (default: 2000)
+- Total output is capped at 15,000 chars to prevent context overflow
 - `--country <code>` - Two-letter country code (default: US)
 - `--freshness <period>` - Filter by time:
   - `pd` - Past day (24 hours)

@@ -591,11 +591,79 @@ async function runQuery(
   };
   resetStallTimer();
 
+  let turnCount = 0;
+  let eventCount = 0;
+  let lastEventType = '';
+  let lastEventTime = Date.now();
+
   const unsubscribe = session.subscribe((event: AgentSessionEvent) => {
     // Any event = API is alive, reset watchdog
     resetStallTimer();
+    eventCount++;
+    const now = Date.now();
+    const gap = now - lastEventTime;
+    lastEventTime = now;
+
+    // Log every event type with timing (debug level)
+    if (event.type !== lastEventType || gap > 5000) {
+      log(`[event #${eventCount}] ${event.type} (${gap}ms since last)`);
+      lastEventType = event.type;
+    }
+
+    if (event.type === 'turn_start') {
+      turnCount++;
+      log(`[turn ${turnCount}] started`);
+    }
+
     if (event.type === 'turn_end') {
       lastAssistant = event.message as Message;
+      const msg = event.message as any;
+      const stopReason = msg?.stopReason || 'unknown';
+      const errorMessage = msg?.errorMessage || '';
+      const contentSummary = Array.isArray(msg?.content)
+        ? msg.content.map((c: any) => {
+            if (c.type === 'text') return `text(${(c.text || '').length} chars)`;
+            if (c.type === 'toolCall') return `toolCall(${c.name}, args=${JSON.stringify(c.arguments || {}).length} chars)`;
+            return c.type;
+          }).join(', ')
+        : 'non-array';
+      log(`[turn ${turnCount}] ended: stopReason=${stopReason}, error=${errorMessage || 'none'}, content=[${contentSummary}]`);
+    }
+
+    if (event.type === 'message_start') {
+      log(`[message_start] role=${(event as any).message?.role || 'unknown'}`);
+    }
+
+    if (event.type === 'message_end') {
+      const msg = event.message as any;
+      const stopReason = msg?.stopReason || 'unknown';
+      const errorMessage = msg?.errorMessage || '';
+      log(`[message_end] role=${msg?.role || 'unknown'}, stopReason=${stopReason}, error=${errorMessage || 'none'}`);
+    }
+
+    if (event.type === 'tool_execution_start') {
+      const te = event as any;
+      log(`[tool_start] ${te.toolName} (id=${te.toolCallId})`);
+    }
+
+    if (event.type === 'tool_execution_end') {
+      const te = event as any;
+      const isError = te.isError || false;
+      log(`[tool_end] ${te.toolName} (id=${te.toolCallId}, error=${isError})`);
+    }
+
+    // Log auto-compaction and retry events
+    if (event.type === 'auto_compaction_start') {
+      log(`[auto_compaction_start] reason=${(event as any).reason}`);
+    }
+    if (event.type === 'auto_compaction_end') {
+      log(`[auto_compaction_end] aborted=${(event as any).aborted}, willRetry=${(event as any).willRetry}, error=${(event as any).errorMessage || 'none'}`);
+    }
+    if (event.type === 'auto_retry_start') {
+      log(`[auto_retry_start] attempt=${(event as any).attempt}/${(event as any).maxAttempts}, delay=${(event as any).delayMs}ms, error=${(event as any).errorMessage}`);
+    }
+    if (event.type === 'auto_retry_end') {
+      log(`[auto_retry_end] success=${(event as any).success}, attempt=${(event as any).attempt}, finalError=${(event as any).finalError || 'none'}`);
     }
   });
 
@@ -611,7 +679,12 @@ async function runQuery(
     // Retry loop for API stalls
     while (true) {
       stallDetected = false;
+      log(`Calling session.prompt() (${prompt.length} chars)...`);
+      const promptStart = Date.now();
       await session.prompt(prompt);
+      const promptDuration = Date.now() - promptStart;
+
+      log(`session.prompt() returned after ${promptDuration}ms (stallDetected=${stallDetected}, events=${eventCount}, turns=${turnCount})`);
 
       if (stallDetected && stallRetries < MAX_STALL_RETRIES) {
         log(`API stall detected, retrying (${stallRetries}/${MAX_STALL_RETRIES})...`);
@@ -622,13 +695,33 @@ async function runQuery(
     }
 
     const text = lastAssistant ? extractMessageText(lastAssistant) : '';
+    log(`Final assistant text: ${text.length} chars, first 200: ${text.slice(0, 200)}`);
+
+    // Log the last assistant message details for debugging aborts
+    if (lastAssistant) {
+      const msg = lastAssistant as any;
+      log(`Final assistant stopReason=${msg.stopReason || 'unknown'}, errorMessage=${msg.errorMessage || 'none'}`);
+      if (msg.stopReason === 'aborted') {
+        log(`WARNING: Last assistant message was aborted! Content types: ${
+          Array.isArray(msg.content) 
+            ? msg.content.map((c: any) => `${c.type}${c.type === 'toolCall' ? `(${c.name})` : ''}`).join(', ')
+            : 'unknown'
+        }`);
+      }
+    } else {
+      log(`WARNING: No lastAssistant message captured after prompt()`);
+    }
+
     const result = parseAgentResponse(text);
     if (result) {
+      log(`Parsed response: outputType=${result.outputType}, hasUserMessage=${!!result.userMessage}, hasLog=${!!result.internalLog}`);
       writeOutput({
         status: 'success',
         result,
         newSessionId: sessionManager.getSessionFile()
       });
+    } else {
+      log(`WARNING: parseAgentResponse returned null for text of ${text.length} chars`);
     }
   } finally {
     if (stallTimer) clearTimeout(stallTimer);

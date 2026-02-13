@@ -34,6 +34,14 @@ if (freshnessIndex !== -1 && args[freshnessIndex + 1]) {
 	args.splice(freshnessIndex, 2);
 }
 
+// Parse max-content option (max chars per page content, default 2000)
+let maxContentChars = 2000;
+const maxContentIndex = args.indexOf("--max-content");
+if (maxContentIndex !== -1 && args[maxContentIndex + 1]) {
+	maxContentChars = parseInt(args[maxContentIndex + 1], 10);
+	args.splice(maxContentIndex, 2);
+}
+
 const query = args.join(" ");
 
 if (!query) {
@@ -41,6 +49,7 @@ if (!query) {
 	console.log("\nOptions:");
 	console.log("  -n <num>              Number of results (default: 5, max: 20)");
 	console.log("  --content             Fetch readable content as markdown");
+	console.log("  --max-content <chars> Max chars per page content (default: 2000)");
 	console.log("  --country <code>      Country code for results (default: US)");
 	console.log("  --freshness <period>  Filter by time: pd (day), pw (week), pm (month), py (year)");
 	console.log("\nEnvironment:");
@@ -124,7 +133,7 @@ function htmlToMarkdown(html) {
 		.trim();
 }
 
-async function fetchPageContent(url) {
+async function fetchPageContent(url, maxChars = 2000) {
 	try {
 		const response = await fetch(url, {
 			headers: {
@@ -144,7 +153,7 @@ async function fetchPageContent(url) {
 		const article = reader.parse();
 
 		if (article && article.content) {
-			return htmlToMarkdown(article.content).substring(0, 5000);
+			return htmlToMarkdown(article.content).substring(0, maxChars);
 		}
 
 		// Fallback: try to get main content
@@ -155,7 +164,7 @@ async function fetchPageContent(url) {
 		const text = main?.textContent || "";
 
 		if (text.trim().length > 100) {
-			return text.trim().substring(0, 5000);
+			return text.trim().substring(0, maxChars);
 		}
 
 		return "(Could not extract content)";
@@ -163,6 +172,10 @@ async function fetchPageContent(url) {
 		return `(Error: ${e.message})`;
 	}
 }
+
+// Hard cap: max total output size (chars) to prevent context overflow
+// Even if user requests more via --max-content or -n, total output is capped
+const MAX_TOTAL_OUTPUT_CHARS = 15000;
 
 // Main
 try {
@@ -174,25 +187,36 @@ try {
 	}
 
 	if (fetchContent) {
+		// Clamp max-content to a reasonable per-page limit
+		const effectiveMaxContent = Math.min(maxContentChars, 2000);
 		for (const result of results) {
-			result.content = await fetchPageContent(result.link);
+			result.content = await fetchPageContent(result.link, effectiveMaxContent);
 		}
 	}
 
+	let output = '';
 	for (let i = 0; i < results.length; i++) {
 		const r = results[i];
-		console.log(`--- Result ${i + 1} ---`);
-		console.log(`Title: ${r.title}`);
-		console.log(`Link: ${r.link}`);
+		let entry = `--- Result ${i + 1} ---\n`;
+		entry += `Title: ${r.title}\n`;
+		entry += `Link: ${r.link}\n`;
 		if (r.age) {
-			console.log(`Age: ${r.age}`);
+			entry += `Age: ${r.age}\n`;
 		}
-		console.log(`Snippet: ${r.snippet}`);
+		entry += `Snippet: ${r.snippet}\n`;
 		if (r.content) {
-			console.log(`Content:\n${r.content}`);
+			entry += `Content:\n${r.content}\n`;
 		}
-		console.log("");
+		entry += '\n';
+
+		if (output.length + entry.length > MAX_TOTAL_OUTPUT_CHARS) {
+			// Include truncation notice
+			output += `\n(Output truncated at ${MAX_TOTAL_OUTPUT_CHARS} chars. ${results.length - i} more results omitted.)\n`;
+			break;
+		}
+		output += entry;
 	}
+	process.stdout.write(output);
 } catch (e) {
 	console.error(`Error: ${e.message}`);
 	process.exit(1);

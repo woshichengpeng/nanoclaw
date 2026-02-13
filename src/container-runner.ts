@@ -379,6 +379,7 @@ export async function runContainerAgent(
     container.stderr.on('data', (data) => {
       const chunk = data.toString();
       stderrTail = appendTail(stderrTail, chunk, ERROR_LOG_TAIL_SIZE);
+      if (throttledOnActivity) throttledOnActivity();
       const lines = chunk.trim().split('\n');
       for (const line of lines) {
         if (line) logger.debug({ container: group.folder }, line);
@@ -548,7 +549,11 @@ export async function runContainerAgent(
       // Streaming mode: results were already delivered via onOutput callbacks
       if (effectiveOnOutput) {
         outputChain.then(() => {
-          logger.info({ group: group.name, duration, streaming: true }, 'Container completed (streaming)');
+          const outputCount = hadStreamingOutput ? 'with output' : 'NO output';
+          logger.info({ group: group.name, duration, streaming: true, hadStreamingOutput, newSessionId: newSessionId || '(none)' }, `Container completed (streaming, ${outputCount})`);
+          if (!hadStreamingOutput) {
+            logger.warn({ group: group.name, stderrTail: stderrTail.slice(-500), stdoutTail: stdoutTail.slice(-500) }, 'Container completed with no streaming output - check agent-runner logs');
+          }
           resolve({ status: code === 0 ? 'success' : 'error', result: null, newSessionId,
             ...(code !== 0 ? { error: `Container exited with code ${code}: ${stderr.slice(-200)}` } : {}) });
         });
